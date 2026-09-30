@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0d10">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Mi Turno</title>
+<style>
+:root{
+ --bg:#0b0d10;--panel:#151a21;--panel2:#1d2430;--line:#2d3643;--text:#f5f7fa;--muted:#9ba7b4;
+ --blue:#1677ff;--green:#22c55e;--orange:#f59e0b;--red:#ef4444
+}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{position:sticky;top:0;z-index:20;background:#0b0d10f2;border-bottom:1px solid var(--line);padding:12px}
+h1{margin:0 0 8px;font-size:24px}.topstats{display:flex;gap:8px;overflow:auto}.pill{white-space:nowrap;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:7px 10px;font-size:12px;cursor:pointer}
+.searchrow{display:flex;gap:8px;margin-top:10px}.searchrow input{flex:1}
+input,select,textarea{width:100%;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:12px;font:inherit}
+button{border:0;border-radius:12px;padding:12px 14px;background:var(--blue);color:white;font-weight:800;font:inherit}
+button.secondary{background:var(--panel2)} button.green{background:var(--green);color:#06200d} button.orange{background:var(--orange);color:#241400} button.danger{background:var(--red)}
+button:disabled{opacity:.5}
+main{padding:12px 12px 92px;max-width:900px;margin:auto}.tabs{display:flex;gap:8px;overflow:auto;margin-bottom:12px}.tab{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:9px 12px;white-space:nowrap}.tab.active{background:var(--blue)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:12px;min-height:112px;display:flex;flex-direction:column;justify-content:space-between}
+.card.active{border-color:var(--green)}.card.pending{border-color:var(--orange)}.title{font-size:15px;font-weight:900}.client{font-size:18px;font-weight:900;margin-top:5px}.small{font-size:12px;color:var(--muted)}
+.status{font-size:12px;font-weight:900}.status.active{color:var(--green)}.status.pending{color:var(--orange)}.status.free{color:var(--muted)}
+nav{position:fixed;bottom:0;left:0;right:0;z-index:30;background:#0f141b;border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(4,1fr);padding-bottom:max(6px,env(safe-area-inset-bottom))}
+nav button{background:transparent;color:var(--muted);border-radius:0;padding:11px 4px;font-size:12px} nav button.active{color:#fff}
+.view{display:none}.view.active{display:block}.list{display:flex;flex-direction:column;gap:10px}.row{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px}.kv{display:grid;grid-template-columns:1fr 1fr;gap:8px}.metric{font-size:25px;font-weight:900}
+dialog{border:0;padding:0;border-radius:20px;background:var(--panel);color:var(--text);width:min(94vw,560px);max-height:90vh;overflow:auto}
+dialog::backdrop{background:#0009}.modal{padding:16px}.modal h2{margin:0 0 12px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.actions button{flex:1;min-width:120px}
+.paytypes{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin:10px 0}.paytype{background:var(--panel2);font-size:12px;padding:10px 6px}.paytype.selected{background:var(--blue)}
+label{display:block;margin-top:10px;margin-bottom:5px;font-size:13px;color:#cbd5e1}.photo{width:100%;max-height:280px;object-fit:contain;background:#050607;border-radius:12px;margin-top:10px}
+hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#111827;border:1px solid #334155;border-radius:12px;padding:10px;font-size:13px;color:#dbeafe}.good{border-color:#14532d;color:#bbf7d0}.warn{border-color:#92400e;color:#fde68a}.hidden{display:none!important}
+.sectionTitle{font-size:18px;font-weight:900;margin:14px 0 8px}
+@media(min-width:700px){.grid{grid-template-columns:repeat(4,1fr)}}
+</style>
+</head>
+<body>
+<header>
+<h1>Mi Turno</h1>
+<div class="topstats">
+  <div class="pill" onclick="goView('viewSearch')">🟢 Activas <b id="sumActive">0</b></div>
+  <div class="pill" onclick="goView('viewPending')">🟠 Pendientes <b id="sumPending">0</b></div>
+  <div class="pill" onclick="goView('viewShift')">💰 Propina QR <b id="sumTips">0.00</b> Bs</div>
+</div>
+<div class="searchrow">
+  <input id="quickSearch" placeholder="Buscar cliente o mesa actual">
+  <button class="secondary" id="voiceBtn">🎙️</button>
+</div>
+</header>
+
+<main>
+<section id="viewTables" class="view active">
+  <div class="tabs" id="zoneTabs"></div>
+  <div class="grid" id="tableGrid"></div>
+</section>
+
+<section id="viewSearch" class="view">
+  <h2>Buscar actuales</h2>
+  <div class="small">Solo activas o pagadas pendientes del turno actual.</div>
+  <input id="searchInput" placeholder="Ej. Pedro o Piscina 1" style="margin-top:10px">
+  <div id="searchResults" class="list" style="margin-top:12px"></div>
+</section>
+
+<section id="viewPending" class="view">
+  <h2>Pendientes de caja</h2>
+  <div id="pendingList" class="list"></div>
+</section>
+
+<section id="viewShift" class="view">
+  <h2>Mi turno</h2>
+  <div class="row">
+    <div class="kv">
+      <div><div class="small">Aperturas</div><div class="metric" id="stOpen">0</div></div>
+      <div><div class="small">Cerradas</div><div class="metric" id="stClosed">0</div></div>
+      <div><div class="small">Activas</div><div class="metric" id="stActive">0</div></div>
+      <div><div class="small">Pendientes</div><div class="metric" id="stPending">0</div></div>
+    </div>
+  </div>
+  <div class="row">
+    <b>Totales</b>
+    <div class="kv" style="margin-top:10px">
+      <div><div class="small">QR venta</div><div id="stQR">0.00 Bs</div></div>
+      <div><div class="small">POS</div><div id="stPOS">0.00 Bs</div></div>
+      <div><div class="small">Efectivo</div><div id="stCash">0.00 Bs</div></div>
+      <div><div class="small">Propina QR</div><div id="stTips">0.00 Bs</div></div>
+    </div>
+  </div>
+  <div class="actions">
+    <button class="secondary" onclick="toggleHistory()">Historial</button>
+    <button class="danger" onclick="endShift()">Cerrar turno</button>
+  </div>
+  <div id="historyWrap" class="hidden" style="margin-top:12px"><div class="list" id="historyList"></div></div>
+</section>
+</main>
+
+<nav>
+<button data-view="viewTables" class="active">▦<br>Mesas</button>
+<button data-view="viewSearch">⌕<br>Buscar</button>
+<button data-view="viewPending">◷<br>Pendientes</button>
+<button data-view="viewShift">◉<br>Mi turno</button>
+</nav>
+
+<dialog id="dlg"><div class="modal" id="dlgBody"></div></dialog>
+
+<script>
+const GROUPS={"M":20,"GALERIA":15,"MIRADOR":7,"PISCINA":20,"CABAÑA":11,"P.A":7,"P.E":7,"P.B":11,"P.C":15,"P.D":9};
+const KEY="mi_turno_pwa_v1";
+let state=JSON.parse(localStorage.getItem(KEY)||"null")||{records:[],nextId:1,shiftId:localDate()};
+let zone="TODAS", payMode="QR", creating=false;
+const $=id=>document.getElementById(id);
+const money=n=>Number(n||0).toFixed(2);
+const now=()=>new Date().toISOString();
+function localDate(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`}
+const esc=s=>String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
+
+function save(){localStorage.setItem(KEY,JSON.stringify(state));renderAll()}
+function allTables(){let a=[];for(const [z,n] of Object.entries(GROUPS))for(let i=1;i<=n;i++)a.push({zone:z,label:`${z} ${i}`});return a}
+function currentRecords(){return state.records.filter(r=>r.shiftId===state.shiftId&&(r.status==="ACTIVE"||r.status==="PAID_PENDING"))}
+function currentFor(table){return currentRecords().find(r=>r.table===table)}
+function showDlg(html){$("dlgBody").innerHTML=html;$("dlg").showModal()}
+function closeDlg(){if($("dlg").open)$("dlg").close()}
+function goView(id){
+ document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("active",x.dataset.view===id));
+ document.querySelectorAll(".view").forEach(v=>v.classList.remove("active"));
+ $(id).classList.add("active");
+ if(id==="viewSearch")setTimeout(()=>$("searchInput")?.focus(),80)
+}
+
+function renderTabs(){$("zoneTabs").innerHTML=["TODAS",...Object.keys(GROUPS)].map(z=>`<button class="tab ${zone===z?"active":""}" onclick="zone='${z}';renderTables()">${z}</button>`).join("")}
+function renderTables(){
+ renderTabs();
+ let arr=allTables().filter(t=>zone==="TODAS"||t.zone===zone);
+ const q=$("quickSearch").value.trim().toLowerCase();
+ if(q)arr=arr.filter(t=>{const r=currentFor(t.label);return t.label.toLowerCase().includes(q)||(r&&r.client.toLowerCase().includes(q))});
+ $("tableGrid").innerHTML=arr.map(t=>{
+   const r=currentFor(t.label);
+   if(!r)return `<div class="card" onclick="openFree('${t.label}')"><div class="title">${t.label}</div><div class="status free">Libre</div></div>`;
+   const p=r.status==="PAID_PENDING";
+   return `<div class="card ${p?"pending":"active"}" onclick="openRecord(${r.id})">
+     <div><div class="title">${t.label}</div><div class="client">${esc(r.client)}</div></div>
+     <div><div class="status ${p?"pending":"active"}">${p?"🟠 Pagada / pendiente":"🟢 Activa"}</div>
+     <div class="small">${new Date(r.openedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}${p&&r.photo?" · 📷":""}</div></div>
+   </div>`;
+ }).join("")
+}
+function openFree(table){
+ if(currentFor(table)){openRecord(currentFor(table).id);return}
+ showDlg(`<h2>${table}</h2><label>Nombre del cliente</label><input id="newClient" placeholder="Ej. Pedro">
+ <div class="actions"><button class="secondary" onclick="closeDlg()">Cancelar</button><button id="openBtn" class="green" onclick="createRecord('${table}')">Abrir mesa</button></div>`);
+ setTimeout(()=>$("newClient")?.focus(),80)
+}
+function createRecord(table){
+ if(creating)return;
+ const name=$("newClient").value.trim();
+ if(!name)return alert("Escribe el nombre del cliente.");
+ const existing=currentFor(table);
+ if(existing){closeDlg();openRecord(existing.id);return}
+ creating=true;
+ $("openBtn").disabled=true;
+ state.records.push({id:state.nextId++,table,client:name,status:"ACTIVE",openedAt:now(),shiftId:state.shiftId,note:"",total:null,payments:[],tip:0,photo:null});
+ save();closeDlg();
+ setTimeout(()=>creating=false,300)
+}
+function openRecord(id){
+ const r=state.records.find(x=>x.id===id);if(!r)return;
+ if(r.status==="ACTIVE"){
+   showDlg(`<h2>${r.table}</h2><div class="client">${esc(r.client)}</div><div class="status active">🟢 Activa</div>
+   <div class="small">Abierta ${new Date(r.openedAt).toLocaleString()}</div>
+   ${r.note?`<div class="notice" style="margin-top:10px">${esc(r.note)}</div>`:""}
+   <div class="actions">
+     <button onclick="openPayment(${id})">Registrar pago</button>
+     <button class="secondary" onclick="rename(${id})">Cambiar nombre</button>
+     <button class="secondary" onclick="move(${id})">Cambiar mesa</button>
+     <button class="secondary" onclick="note(${id})">Agregar nota</button>
+   </div>`)
+ }else{
+   const pay=r.payments.map(p=>`${p.type}: ${money(p.sale)} Bs${p.type==="QR"?` · recibido ${money(p.received)} Bs`:""}`).join("<br>");
+   showDlg(`<h2>${r.table}</h2><div class="client">${esc(r.client)}</div><div class="status pending">🟠 Pagada / pendiente de caja</div>
+   <hr><div><b>Total cuenta:</b> ${money(r.total)} Bs</div><div style="margin-top:6px">${pay}</div>
+   <div style="margin-top:6px"><b>Propina QR:</b> ${money(r.tip)} Bs</div>
+   ${r.photo?`<img class="photo" src="${r.photo}" alt="Comprobante">`:""}
+   <div class="actions">
+     <button class="green" onclick="confirmClose(${id})">Confirmar cierre</button>
+     <button class="secondary" onclick="openPayment(${id},true)">Corregir pago</button>
+     <button class="secondary" onclick="rename(${id})">Cambiar nombre</button>
+     <button class="secondary" onclick="move(${id})">Cambiar mesa</button>
+   </div>`)
+ }
+}
+function rename(id){const r=state.records.find(x=>x.id===id);showDlg(`<h2>Cambiar nombre</h2><input id="renameInput" value="${esc(r.client)}"><div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button onclick="saveRename(${id})">Guardar</button></div>`)}
+function saveRename(id){const r=state.records.find(x=>x.id===id),v=$("renameInput").value.trim();if(v){r.client=v;save();openRecord(id)}}
+function move(id){const r=state.records.find(x=>x.id===id);showDlg(`<h2>Cambiar mesa</h2><select id="moveSel">${allTables().map(t=>`<option ${t.label===r.table?"selected":""}>${t.label}</option>`).join("")}</select><div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button onclick="saveMove(${id})">Guardar</button></div>`)}
+function saveMove(id){const r=state.records.find(x=>x.id===id),dest=$("moveSel").value,ex=currentFor(dest);if(ex&&ex.id!==id)return alert(`${dest} ya está en uso por ${ex.client}.`);r.table=dest;save();openRecord(id)}
+function note(id){const r=state.records.find(x=>x.id===id);showDlg(`<h2>Agregar nota</h2><textarea id="noteInput" rows="4">${esc(r.note||"")}</textarea><div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button onclick="saveNote(${id})">Guardar</button></div>`)}
+function saveNote(id){const r=state.records.find(x=>x.id===id);r.note=$("noteInput").value.trim();save();openRecord(id)}
+
+function openPayment(id,editing=false){
+ const r=state.records.find(x=>x.id===id);payMode=(r.payments?.length?(r.payments.length>1?"MIXTO":r.payments[0].type):"QR");
+ showDlg(`<h2>${editing?"Corregir":"Registrar"} pago</h2>
+ <div class="notice">Primero escribe el total real de Restotech. Después elige cómo pagó.</div>
+ <label>Total de la cuenta (Bs)</label><input id="totalInput" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 800" value="${r.total??""}" oninput="refreshPaymentPreview()">
+ <label>Forma de pago</label><div class="paytypes">${["QR","POS","EFECTIVO","MIXTO"].map(x=>`<button type="button" class="paytype ${payMode===x?"selected":""}" onclick="selectPay('${x}')">${x}</button>`).join("")}</div>
+ <div id="payFields"></div>
+ <div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button class="green" onclick="savePayment(${id})">Guardar pago</button></div>`);
+ renderPayFields()
+}
+function selectPay(mode){payMode=mode;document.querySelectorAll(".paytype").forEach(b=>b.classList.toggle("selected",b.textContent===mode));renderPayFields()}
+function renderPayFields(){
+ const box=$("payFields");if(!box)return;
+ if(payMode==="QR")box.innerHTML=`<label>Monto recibido por QR (Bs)</label><input id="qrReceived" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 520" oninput="refreshPaymentPreview()"><div class="notice good" id="payPreview" style="margin-top:10px">Propina QR: 0.00 Bs</div><label>Foto del comprobante QR</label><input id="photoInput" type="file" accept="image/*" capture="environment">`;
+ if(payMode==="POS")box.innerHTML=`<label>Monto pagado por POS (Bs)</label><input id="posAmount" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 500"><div class="notice" id="payPreview" style="margin-top:10px">POS no genera propina automática.</div>`;
+ if(payMode==="EFECTIVO")box.innerHTML=`<label>Monto pagado en efectivo (Bs)</label><input id="cashAmount" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 500"><div class="notice" id="payPreview" style="margin-top:10px">Efectivo no genera propina automática.</div>`;
+ if(payMode==="MIXTO")box.innerHTML=`<div class="notice">Escribe solo lo recibido por cada medio. Los campos empiezan vacíos. Si el total recibido supera la cuenta, la diferencia se registra como propina QR.</div>
+ <div class="kv">
+  <div><label>QR recibido</label><input id="mixQrReceived" type="number" inputmode="decimal" step="0.01" placeholder="QR" oninput="refreshPaymentPreview()"></div>
+  <div><label>POS</label><input id="mixPos" type="number" inputmode="decimal" step="0.01" placeholder="POS" oninput="refreshPaymentPreview()"></div>
+  <div><label>Efectivo</label><input id="mixCash" type="number" inputmode="decimal" step="0.01" placeholder="Efectivo" oninput="refreshPaymentPreview()"></div>
+ </div>
+ <div class="notice good" id="payPreview" style="margin-top:10px">Propina QR: 0.00 Bs</div>
+ <label>Foto del comprobante QR</label><input id="photoInput" type="file" accept="image/*" capture="environment">`;
+ refreshPaymentPreview()
+}
+function refreshPaymentPreview(){
+ const box=$("payPreview");if(!box)return;const total=Number($("totalInput")?.value||0);
+ if(payMode==="QR"){const qr=Number($("qrReceived")?.value||0),tip=Math.max(0,qr-total);box.textContent=`Propina QR: ${money(tip)} Bs`;box.className="notice "+(qr>=total?"good":"warn")}
+ if(payMode==="MIXTO"){const qr=Number($("mixQrReceived")?.value||0),pos=Number($("mixPos")?.value||0),cash=Number($("mixCash")?.value||0),received=qr+pos+cash,missing=Math.max(0,total-received),tip=Math.max(0,received-total);if(missing>0){box.textContent=`Total recibido: ${money(received)} Bs · Falta ${money(missing)} Bs.`;box.className="notice warn"}else{box.textContent=`Total recibido: ${money(received)} Bs · Propina QR: ${money(tip)} Bs`;box.className="notice good"}}
+}
+async function compressPhoto(input){
+ const f=input?.files?.[0];if(!f)return null;
+ const data=await new Promise((res,rej)=>{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=rej;fr.readAsDataURL(f)});
+ const img=await new Promise((res,rej)=>{const im=new Image();im.onload=()=>res(im);im.onerror=rej;im.src=data});
+ const max=1200,scale=Math.min(1,max/Math.max(img.width,img.height)),w=Math.round(img.width*scale),h=Math.round(img.height*scale);
+ const c=document.createElement("canvas");c.width=w;c.height=h;c.getContext("2d").drawImage(img,0,0,w,h);
+ return c.toDataURL("image/jpeg",0.72)
+}
+async function savePayment(id){
+ const r=state.records.find(x=>x.id===id),total=Number($("totalInput").value);if(!Number.isFinite(total)||total<=0)return alert("Escribe el total real de la cuenta.");
+ let payments=[],tip=0;
+ if(payMode==="QR"){
+  const qr=Number($("qrReceived").value);if(!Number.isFinite(qr)||qr<total)return alert("El QR recibido debe cubrir la cuenta.");tip=qr-total;payments=[{type:"QR",sale:total,received:qr}]
+ }else if(payMode==="POS"){
+  const pos=Number($("posAmount").value);if(!Number.isFinite(pos)||Math.abs(pos-total)>.01)return alert("El POS debe cuadrar con la cuenta.");payments=[{type:"POS",sale:total,received:pos}]
+ }else if(payMode==="EFECTIVO"){
+  const cash=Number($("cashAmount").value);if(!Number.isFinite(cash)||Math.abs(cash-total)>.01)return alert("El efectivo debe cuadrar con la cuenta.");payments=[{type:"EFECTIVO",sale:total,received:cash}]
+ }else{
+  const qr=Number($("mixQrReceived").value||0),pos=Number($("mixPos").value||0),cash=Number($("mixCash").value||0),received=qr+pos+cash;
+  if(received<total-.01)return alert(`Recibiste ${money(received)} Bs y falta ${money(total-received)} Bs.`);
+  const nonQr=pos+cash;if(nonQr>total+.01)return alert("POS + efectivo no pueden superar el total de la cuenta porque la propina solo sale del QR.");
+  const qrSale=Math.max(0,total-nonQr);if(qr<qrSale-.01)return alert(`Al QR le corresponden al menos ${money(qrSale)} Bs para completar la cuenta.`);
+  tip=Math.max(0,qr-qrSale);
+  if(qr>0)payments.push({type:"QR",sale:qrSale,received:qr});
+  if(pos>0)payments.push({type:"POS",sale:pos,received:pos});
+  if(cash>0)payments.push({type:"EFECTIVO",sale:cash,received:cash})
+ }
+ const photo=await compressPhoto($("photoInput"));
+ r.total=total;r.payments=payments;r.tip=tip;r.photo=photo||r.photo;r.status="PAID_PENDING";r.paidAt=now();save();closeDlg()
+}
+function confirmClose(id){const r=state.records.find(x=>x.id===id);if(!confirm(`¿Confirmas que ${r.table} / ${r.client} ya quedó cerrada en caja?`))return;r.status="CLOSED";r.closedAt=now();save();closeDlg()}
+function renderSearch(){const q=$("searchInput").value.trim().toLowerCase(),rows=currentRecords().filter(r=>!q||r.client.toLowerCase().includes(q)||r.table.toLowerCase().includes(q));$("searchResults").innerHTML=rows.length?rows.map(r=>`<div class="row" onclick="openRecord(${r.id})"><b>${esc(r.client)}</b><div>${r.table}</div><div class="status ${r.status==="ACTIVE"?"active":"pending"}">${r.status==="ACTIVE"?"🟢 Activa":"🟠 Pagada pendiente"}</div></div>`).join(""):`<div class="small">Sin resultados actuales.</div>`}
+function renderPending(){const rows=currentRecords().filter(r=>r.status==="PAID_PENDING");$("pendingList").innerHTML=rows.length?rows.map(r=>`<div class="row" onclick="openRecord(${r.id})"><b>${r.table} · ${esc(r.client)}</b><div>Cuenta ${money(r.total)} Bs · ${r.payments.map(p=>p.type).join(" + ")} · Propina ${money(r.tip)} Bs ${r.photo?"· 📷":""}</div><div class="small">Pagada ${new Date(r.paidAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</div></div>`).join(""):`<div class="small">No tienes pagos pendientes.</div>`}
+function renderStats(){
+ const today=state.records.filter(r=>r.shiftId===state.shiftId),curr=currentRecords();let qr=0,pos=0,cash=0,tips=0;
+ for(const r of today){tips+=Number(r.tip||0);for(const p of(r.payments||[])){if(p.type==="QR")qr+=Number(p.sale||0);if(p.type==="POS")pos+=Number(p.sale||0);if(p.type==="EFECTIVO")cash+=Number(p.sale||0)}}
+ $("sumActive").textContent=curr.filter(r=>r.status==="ACTIVE").length;$("sumPending").textContent=curr.filter(r=>r.status==="PAID_PENDING").length;$("sumTips").textContent=money(tips);
+ $("stOpen").textContent=today.length;$("stClosed").textContent=today.filter(r=>r.status==="CLOSED").length;$("stActive").textContent=curr.filter(r=>r.status==="ACTIVE").length;$("stPending").textContent=curr.filter(r=>r.status==="PAID_PENDING").length;
+ $("stQR").textContent=money(qr)+" Bs";$("stPOS").textContent=money(pos)+" Bs";$("stCash").textContent=money(cash)+" Bs";$("stTips").textContent=money(tips)+" Bs"
+}
+function toggleHistory(){$("historyWrap").classList.toggle("hidden");$("historyList").innerHTML=[...state.records].reverse().map(r=>`<div class="row"><b>${r.table} · ${esc(r.client)}</b><div>${r.shiftId} · ${r.status}</div><div>${r.total!=null?`Cuenta ${money(r.total)} Bs · Propina ${money(r.tip)} Bs`:""}</div></div>`).join("")}
+function endShift(){const curr=currentRecords();if(curr.length)return alert(`No puedes cerrar todavía: tienes ${curr.length} cuenta(s) activa(s) o pendiente(s).`);if(confirm("¿Cerrar turno e iniciar uno nuevo? El historial se conserva.")){state.shiftId=localDate()+"-"+Date.now();save()}}
+function renderAll(){renderTables();renderSearch();renderPending();renderStats()}
+$("quickSearch").addEventListener("input",renderTables);$("searchInput").addEventListener("input",renderSearch);
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>goView(b.dataset.view));
+$("voiceBtn").onclick=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR)return alert("La búsqueda por voz no está disponible en este navegador.");const rec=new SR();rec.lang="es-ES";rec.onresult=e=>{$("quickSearch").value=e.results[0][0].transcript;renderTables()};rec.start()};
+renderAll();
+if("serviceWorker" in navigator)navigator.serviceWorker.register("./sw.js");
+</script>
+</body>
+</html>
