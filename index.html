@@ -161,21 +161,39 @@ function recordTimestamp(r){
  const ts=Date.parse(raw||"");
  return Number.isFinite(ts)?ts:null;
 }
+function normalizeState(){
+ let changed=false;
+ for(const r of state.records){
+  if(!Array.isArray(r.payments)){r.payments=[];changed=true}
+  for(const p of r.payments){
+   if(!p.createdAt){p.createdAt=r.paidAt||r.openedAt||now();changed=true}
+   if(p.received==null && p.sale!=null){p.received=Number(p.sale||0);changed=true}
+   if(p.sale==null){p.sale=Number(p.received||0);changed=true}
+  }
+  // Migra la foto única de versiones anteriores al primer QR.
+  if(r.photo){
+   const qr=r.payments.find(p=>p.type==="QR");
+   if(qr && !qr.photo){qr.photo=r.photo;changed=true}
+   r.photo=null;changed=true
+  }
+ }
+ return changed
+}
 async function cleanupOldData(){
  const cutoff=Date.now()-(DATA_RETENTION_DAYS*24*60*60*1000);
- let changed=false;
+ let changed=normalizeState();
  const kept=[];
  for(const r of state.records){
   const ts=recordTimestamp(r);
 
-  // Toda foto con más de 15 días se elimina.
-  if(r.photo && ts!==null && ts<cutoff){
-   r.photo=null;
-   changed=true;
+  // Las fotos QR se conservan 15 días, incluso si la cuenta sigue activa o pendiente.
+  for(const p of (r.payments||[])){
+   const pts=Date.parse(p.createdAt||r.paidAt||r.openedAt||"");
+   if(p.photo && Number.isFinite(pts) && pts<cutoff){p.photo=null;changed=true}
   }
 
   // El historial CERRADO se conserva 15 días.
-  // Activas y pendientes se protegen para no perder cuentas sin resolver.
+  // Las cuentas ACTIVAS o PENDIENTES se protegen hasta resolverse.
   if(r.status==="CLOSED" && ts!==null && ts<cutoff){
    changed=true;
    continue;
@@ -198,6 +216,36 @@ function localDate(){const d=new Date();return `${d.getFullYear()}-${String(d.ge
 const esc=s=>String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
 
 function save(){persistState();renderAll()}
+function totalReceived(r){return (r.payments||[]).reduce((s,p)=>s+Number(p.received||0),0)}
+function totalByType(r,type){return (r.payments||[]).filter(p=>p.type===type).reduce((s,p)=>s+Number(p.received||0),0)}
+function qrPhotoCount(r){return (r.payments||[]).filter(p=>p.type==="QR"&&p.photo).length}
+function accountBalance(r){return Math.max(0,Number(r.total||0)-totalReceived(r))}
+function recalcFinalAllocation(r){
+ const total=Number(r.total||0);
+ const qrTotal=totalByType(r,"QR"), pos=totalByType(r,"POS"), cash=totalByType(r,"EFECTIVO");
+ const received=qrTotal+pos+cash;
+ if(!Number.isFinite(total)||total<=0)return {ok:false,msg:"Escribe el total real de la cuenta."};
+ if(received<total-.01)return {ok:false,msg:`Faltan ${money(total-received)} Bs para completar la cuenta.`};
+ const nonQr=pos+cash;
+ if(nonQr>total+.01)return {ok:false,msg:"POS + efectivo superan el total de la cuenta. Corrige los movimientos."};
+ const qrSaleTarget=Math.max(0,total-nonQr);
+ if(qrTotal<qrSaleTarget-.01)return {ok:false,msg:`El QR acumulado debe cubrir al menos ${money(qrSaleTarget)} Bs.`};
+ let qrRemaining=qrSaleTarget;
+ for(const p of (r.payments||[])){
+  const recv=Number(p.received||0);
+  if(p.type==="QR"){
+   p.sale=Math.min(recv,Math.max(0,qrRemaining));
+   p.tip=Math.max(0,recv-p.sale);
+   qrRemaining-=p.sale;
+  }else{
+   p.sale=recv;
+   p.tip=0;
+  }
+ }
+ r.tip=Math.max(0,received-total);
+ return {ok:true,received,tip:r.tip}
+}
+
 function allTables(){let a=[];for(const [z,n] of Object.entries(GROUPS))for(let i=1;i<=n;i++)a.push({zone:z,label:`${z} ${i}`});return a}
 function currentRecords(){return state.records.filter(r=>r.shiftId===state.shiftId&&(r.status==="ACTIVE"||r.status==="PAID_PENDING"))}
 function currentFor(table){return currentRecords().find(r=>r.table===table)}
@@ -223,7 +271,7 @@ function renderTables(){
    return `<div class="card ${p?"pending":"active"}" onclick="openRecord(${r.id})">
      <div><div class="title">${t.label}</div><div class="client">${esc(r.client)}</div></div>
      <div><div class="status ${p?"pending":"active"}">${p?"🟠 Pagada / pendiente":"🟢 Activa"}</div>
-     <div class="small">${new Date(r.openedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}${p&&r.photo?" · 📷":""}</div></div>
+     <div class="small">${new Date(r.openedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}${qrPhotoCount(r)?` · 📷${qrPhotoCount(r)>1?`×${qrPhotoCount(r)}`:""}`:""}</div></div>
    </div>`;
  }).join("")
 }
@@ -245,27 +293,52 @@ function createRecord(table){
  save();closeDlg();
  setTimeout(()=>creating=false,300)
 }
+function paymentRows(r,withDelete=false){
+ const rows=(r.payments||[]).map((p,i)=>{
+  const when=p.createdAt?new Date(p.createdAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}):"";
+  const photo=p.type==="QR"?(p.photo?"📷":"sin foto"):"";
+  const detail=p.type==="QR"
+    ?`QR ${money(p.received)} Bs ${photo}`
+    :`${p.type} ${money(p.received)} Bs`;
+  return `<div class="row" style="margin-top:7px">
+    <b>Pago ${i+1}: ${detail}</b>
+    <div class="small">${when}</div>
+    ${withDelete?`<div style="margin-top:6px"><button class="danger" onclick="deletePayment(${r.id},${i})">Eliminar este pago</button></div>`:""}
+  </div>`
+ }).join("");
+ return rows||`<div class="small">Todavía no hay pagos registrados.</div>`
+}
+function accountSummary(r){
+ const total=Number(r.total||0),received=totalReceived(r),balance=Math.max(0,total-received);
+ return `<div class="notice ${total>0&&balance<=.01?"good":""}">
+   <b>Cuenta:</b> ${money(total)} Bs · <b>Recibido:</b> ${money(received)} Bs · <b>Falta:</b> ${money(balance)} Bs
+   ${qrPhotoCount(r)?`<br>Comprobantes QR: ${qrPhotoCount(r)}`:""}
+ </div>`
+}
 function openRecord(id){
  const r=state.records.find(x=>x.id===id);if(!r)return;
  if(r.status==="ACTIVE"){
    showDlg(`<h2>${r.table}</h2><div class="client">${esc(r.client)}</div><div class="status active">🟢 Activa</div>
    <div class="small">Abierta ${new Date(r.openedAt).toLocaleString()}</div>
    ${r.note?`<div class="notice" style="margin-top:10px">${esc(r.note)}</div>`:""}
+   ${r.total!=null?accountSummary(r):""}
+   ${(r.payments||[]).length?`<div style="margin-top:10px">${paymentRows(r,false)}</div>`:""}
    <div class="actions">
-     <button onclick="openPayment(${id})">Registrar pago</button>
+     <button onclick="openPaymentManager(${id})">${(r.payments||[]).length?"Pagos / actualizar cuenta":"Registrar pago"}</button>
      <button class="secondary" onclick="rename(${id})">Cambiar nombre</button>
      <button class="secondary" onclick="move(${id})">Cambiar mesa</button>
      <button class="secondary" onclick="note(${id})">Agregar nota</button>
    </div>`)
  }else{
-   const pay=r.payments.map(p=>`${p.type}: ${money(p.sale)} Bs${p.type==="QR"?` · recibido ${money(p.received)} Bs`:""}`).join("<br>");
+   const finalized=recalcFinalAllocation(r);
    showDlg(`<h2>${r.table}</h2><div class="client">${esc(r.client)}</div><div class="status pending">🟠 Pagada / pendiente de caja</div>
-   <hr><div><b>Total cuenta:</b> ${money(r.total)} Bs</div><div style="margin-top:6px">${pay}</div>
-   <div style="margin-top:6px"><b>Propina QR:</b> ${money(r.tip)} Bs</div>
-   ${r.photo?`<img class="photo" src="${r.photo}" alt="Comprobante">`:""}
+   ${accountSummary(r)}
+   <div style="margin-top:10px">${paymentRows(r,false)}</div>
+   <div style="margin-top:8px"><b>Propina QR:</b> ${money(r.tip)} Bs</div>
+   ${paymentPhotoGallery(r)}
    <div class="actions">
      <button class="green" onclick="confirmClose(${id})">Confirmar cierre</button>
-     <button class="secondary" onclick="openPayment(${id},true)">Corregir pago</button>
+     <button class="secondary" onclick="openPaymentManager(${id})">Corregir / agregar pago</button>
      <button class="secondary" onclick="rename(${id})">Cambiar nombre</button>
      <button class="secondary" onclick="move(${id})">Cambiar mesa</button>
    </div>`)
@@ -278,36 +351,84 @@ function saveMove(id){const r=state.records.find(x=>x.id===id),dest=$("moveSel")
 function note(id){const r=state.records.find(x=>x.id===id);showDlg(`<h2>Agregar nota</h2><textarea id="noteInput" rows="4">${esc(r.note||"")}</textarea><div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button onclick="saveNote(${id})">Guardar</button></div>`)}
 function saveNote(id){const r=state.records.find(x=>x.id===id);r.note=$("noteInput").value.trim();save();openRecord(id)}
 
-function openPayment(id,editing=false){
- const r=state.records.find(x=>x.id===id);payMode=(r.payments?.length?(r.payments.length>1?"MIXTO":r.payments[0].type):"QR");
- showDlg(`<h2>${editing?"Corregir":"Registrar"} pago</h2>
- <div class="notice">Primero escribe el total real de Restotech. Después elige cómo pagó.</div>
- <label>Total de la cuenta (Bs)</label><input id="totalInput" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 800" value="${r.total??""}" oninput="refreshPaymentPreview()">
- <label>Forma de pago</label><div class="paytypes">${["QR","POS","EFECTIVO","MIXTO"].map(x=>`<button type="button" class="paytype ${payMode===x?"selected":""}" onclick="selectPay('${x}')">${x}</button>`).join("")}</div>
- <div id="payFields"></div>
- <div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button class="green" onclick="savePayment(${id})">Guardar pago</button></div>`);
- renderPayFields()
-}
-function selectPay(mode){payMode=mode;document.querySelectorAll(".paytype").forEach(b=>b.classList.toggle("selected",b.textContent===mode));renderPayFields()}
-function renderPayFields(){
- const box=$("payFields");if(!box)return;
- if(payMode==="QR")box.innerHTML=`<label>Monto recibido por QR (Bs)</label><input id="qrReceived" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 520" oninput="refreshPaymentPreview()"><div class="notice good" id="payPreview" style="margin-top:10px">Propina QR: 0.00 Bs</div><label>Foto del comprobante QR</label><input id="photoInput" type="file" accept="image/*" capture="environment">`;
- if(payMode==="POS")box.innerHTML=`<label>Monto pagado por POS (Bs)</label><input id="posAmount" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 500"><div class="notice" id="payPreview" style="margin-top:10px">POS no genera propina automática.</div>`;
- if(payMode==="EFECTIVO")box.innerHTML=`<label>Monto pagado en efectivo (Bs)</label><input id="cashAmount" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 500"><div class="notice" id="payPreview" style="margin-top:10px">Efectivo no genera propina automática.</div>`;
- if(payMode==="MIXTO")box.innerHTML=`<div class="notice">Escribe solo lo recibido por cada medio. Los campos empiezan vacíos. Si el total recibido supera la cuenta, la diferencia se registra como propina QR.</div>
- <div class="kv">
-  <div><label>QR recibido</label><input id="mixQrReceived" type="number" inputmode="decimal" step="0.01" placeholder="QR" oninput="refreshPaymentPreview()"></div>
-  <div><label>POS</label><input id="mixPos" type="number" inputmode="decimal" step="0.01" placeholder="POS" oninput="refreshPaymentPreview()"></div>
-  <div><label>Efectivo</label><input id="mixCash" type="number" inputmode="decimal" step="0.01" placeholder="Efectivo" oninput="refreshPaymentPreview()"></div>
+function openPaymentManager(id){
+ const r=state.records.find(x=>x.id===id);
+ showDlg(`<h2>Pagos de ${r.table}</h2>
+ <div class="client">${esc(r.client)}</div>
+ <div class="notice">Puedes aumentar el total de la cuenta y registrar varios pagos sin cerrar la mesa. Cada QR puede tener su propia foto.</div>
+ <label>Total actual de la cuenta en Restotech (Bs)</label>
+ <input id="accountTotalInput" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 1200" value="${r.total??""}">
+ <div class="actions"><button class="secondary" onclick="saveAccountTotal(${id})">Guardar / actualizar total</button></div>
+ ${accountSummary(r)}
+ <h3 style="margin-top:14px">Movimientos registrados</h3>
+ ${paymentRows(r,true)}
+ <div class="actions">
+   <button onclick="openAddPayment(${id},'QR')">+ QR</button>
+   <button class="secondary" onclick="openAddPayment(${id},'POS')">+ POS</button>
+   <button class="secondary" onclick="openAddPayment(${id},'EFECTIVO')">+ Efectivo</button>
  </div>
- <div class="notice good" id="payPreview" style="margin-top:10px">Propina QR: 0.00 Bs</div>
- <label>Foto del comprobante QR</label><input id="photoInput" type="file" accept="image/*" capture="environment">`;
- refreshPaymentPreview()
+ <div class="actions">
+   <button class="secondary" onclick="openRecord(${id})">Volver</button>
+   <button class="green" onclick="finalizePayments(${id})">Pago completo → pendiente caja</button>
+ </div>`)
 }
-function refreshPaymentPreview(){
- const box=$("payPreview");if(!box)return;const total=Number($("totalInput")?.value||0);
- if(payMode==="QR"){const qr=Number($("qrReceived")?.value||0),tip=Math.max(0,qr-total);box.textContent=`Propina QR: ${money(tip)} Bs`;box.className="notice "+(qr>=total?"good":"warn")}
- if(payMode==="MIXTO"){const qr=Number($("mixQrReceived")?.value||0),pos=Number($("mixPos")?.value||0),cash=Number($("mixCash")?.value||0),received=qr+pos+cash,missing=Math.max(0,total-received),tip=Math.max(0,received-total);if(missing>0){box.textContent=`Total recibido: ${money(received)} Bs · Falta ${money(missing)} Bs.`;box.className="notice warn"}else{box.textContent=`Total recibido: ${money(received)} Bs · Propina QR: ${money(tip)} Bs`;box.className="notice good"}}
+function saveAccountTotal(id){
+ const r=state.records.find(x=>x.id===id),v=Number($("accountTotalInput").value);
+ if(!Number.isFinite(v)||v<=0)return alert("Escribe un total válido.");
+ r.total=v;
+ // Si estaba pendiente y el total subió por encima de lo recibido, vuelve a activa.
+ if(r.status==="PAID_PENDING" && totalReceived(r)<v-.01){r.status="ACTIVE";r.paidAt=null}
+ save();openPaymentManager(id)
+}
+function openAddPayment(id,type){
+ const r=state.records.find(x=>x.id===id);
+ const label=type==="QR"?"Monto recibido por QR":type==="POS"?"Monto pagado por POS":"Monto pagado en efectivo";
+ showDlg(`<h2>Agregar ${type}</h2>
+ <div class="client">${r.table} · ${esc(r.client)}</div>
+ <label>${label} (Bs)</label>
+ <input id="newPayAmount" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 200">
+ ${type==="QR"?`<label>Foto del comprobante QR</label><input id="newPayPhoto" type="file" accept="image/*" capture="environment"><div class="small">La foto es recomendable para tu respaldo, pero puedes guardar el pago sin foto.</div>`:""}
+ <div class="actions">
+   <button class="secondary" onclick="openPaymentManager(${id})">Cancelar</button>
+   <button class="green" onclick="addPayment(${id},'${type}')">Guardar ${type}</button>
+ </div>`)
+}
+async function addPayment(id,type){
+ const r=state.records.find(x=>x.id===id),amount=Number($("newPayAmount").value);
+ if(!Number.isFinite(amount)||amount<=0)return alert("Escribe un monto válido.");
+ const payment={type,received:amount,sale:amount,tip:0,createdAt:now(),photo:null};
+ if(type==="QR")payment.photo=await compressPhoto($("newPayPhoto"));
+ r.payments.push(payment);
+ // Si una cuenta ya estaba pendiente y se corrige, la dejamos pendiente solo si todavía cubre el total.
+ if(r.status==="PAID_PENDING" && r.total && totalReceived(r)<Number(r.total)-.01){r.status="ACTIVE";r.paidAt=null}
+ save();openPaymentManager(id)
+}
+function deletePayment(id,index){
+ const r=state.records.find(x=>x.id===id);
+ if(!r||!r.payments[index])return;
+ if(!confirm(`¿Eliminar el pago ${index+1} de ${r.table}?`))return;
+ r.payments.splice(index,1);
+ if(r.status==="PAID_PENDING" && (!r.total || totalReceived(r)<Number(r.total)-.01)){r.status="ACTIVE";r.paidAt=null}
+ save();openPaymentManager(id)
+}
+function finalizePayments(id){
+ const r=state.records.find(x=>x.id===id);
+ // Captura el total que esté escrito, por si el usuario lo cambió antes de finalizar.
+ const input=$("accountTotalInput");
+ if(input){
+   const v=Number(input.value);
+   if(Number.isFinite(v)&&v>0)r.total=v;
+ }
+ const result=recalcFinalAllocation(r);
+ if(!result.ok){save();return alert(result.msg)}
+ r.status="PAID_PENDING";r.paidAt=now();save();openRecord(id)
+}
+function paymentPhotoGallery(r){
+ const qrs=(r.payments||[]).map((p,i)=>({p,i})).filter(x=>x.p.type==="QR"&&x.p.photo);
+ if(!qrs.length)return "";
+ return `<div style="margin-top:12px"><b>Comprobantes QR (${qrs.length}):</b>
+ ${qrs.map(x=>`<div class="small" style="margin-top:8px">QR ${x.i+1} · ${money(x.p.received)} Bs</div><img class="photo" src="${x.p.photo}" alt="Comprobante QR ${x.i+1}">`).join("")}
+ </div>`
 }
 async function compressPhoto(input){
  const f=input?.files?.[0];if(!f)return null;
@@ -317,37 +438,15 @@ async function compressPhoto(input){
  const c=document.createElement("canvas");c.width=w;c.height=h;c.getContext("2d").drawImage(img,0,0,w,h);
  return c.toDataURL("image/jpeg",0.72)
 }
-async function savePayment(id){
- const r=state.records.find(x=>x.id===id),total=Number($("totalInput").value);if(!Number.isFinite(total)||total<=0)return alert("Escribe el total real de la cuenta.");
- let payments=[],tip=0;
- if(payMode==="QR"){
-  const qr=Number($("qrReceived").value);if(!Number.isFinite(qr)||qr<total)return alert("El QR recibido debe cubrir la cuenta.");tip=qr-total;payments=[{type:"QR",sale:total,received:qr}]
- }else if(payMode==="POS"){
-  const pos=Number($("posAmount").value);if(!Number.isFinite(pos)||Math.abs(pos-total)>.01)return alert("El POS debe cuadrar con la cuenta.");payments=[{type:"POS",sale:total,received:pos}]
- }else if(payMode==="EFECTIVO"){
-  const cash=Number($("cashAmount").value);if(!Number.isFinite(cash)||Math.abs(cash-total)>.01)return alert("El efectivo debe cuadrar con la cuenta.");payments=[{type:"EFECTIVO",sale:total,received:cash}]
- }else{
-  const qr=Number($("mixQrReceived").value||0),pos=Number($("mixPos").value||0),cash=Number($("mixCash").value||0),received=qr+pos+cash;
-  if(received<total-.01)return alert(`Recibiste ${money(received)} Bs y falta ${money(total-received)} Bs.`);
-  const nonQr=pos+cash;if(nonQr>total+.01)return alert("POS + efectivo no pueden superar el total de la cuenta porque la propina solo sale del QR.");
-  const qrSale=Math.max(0,total-nonQr);if(qr<qrSale-.01)return alert(`Al QR le corresponden al menos ${money(qrSale)} Bs para completar la cuenta.`);
-  tip=Math.max(0,qr-qrSale);
-  if(qr>0)payments.push({type:"QR",sale:qrSale,received:qr});
-  if(pos>0)payments.push({type:"POS",sale:pos,received:pos});
-  if(cash>0)payments.push({type:"EFECTIVO",sale:cash,received:cash})
- }
- const photo=await compressPhoto($("photoInput"));
- r.total=total;r.payments=payments;r.tip=tip;r.photo=photo||r.photo;r.status="PAID_PENDING";r.paidAt=now();save();closeDlg()
-}
 function confirmClose(id){const r=state.records.find(x=>x.id===id);if(!confirm(`¿Confirmas que ${r.table} / ${r.client} ya quedó cerrada en caja?`))return;r.status="CLOSED";r.closedAt=now();save();closeDlg()}
 function renderSearch(){const q=$("searchInput").value.trim().toLowerCase(),rows=currentRecords().filter(r=>!q||r.client.toLowerCase().includes(q)||r.table.toLowerCase().includes(q));$("searchResults").innerHTML=rows.length?rows.map(r=>`<div class="row" onclick="openRecord(${r.id})"><b>${esc(r.client)}</b><div>${r.table}</div><div class="status ${r.status==="ACTIVE"?"active":"pending"}">${r.status==="ACTIVE"?"🟢 Activa":"🟠 Pagada pendiente"}</div></div>`).join(""):`<div class="small">Sin resultados actuales.</div>`}
-function renderPending(){const rows=currentRecords().filter(r=>r.status==="PAID_PENDING");$("pendingList").innerHTML=rows.length?rows.map(r=>`<div class="row" onclick="openRecord(${r.id})"><b>${r.table} · ${esc(r.client)}</b><div>Cuenta ${money(r.total)} Bs · ${r.payments.map(p=>p.type).join(" + ")} · Propina ${money(r.tip)} Bs ${r.photo?"· 📷":""}</div><div class="small">Pagada ${new Date(r.paidAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</div></div>`).join(""):`<div class="small">No tienes pagos pendientes.</div>`}
-function renderStats(){
- const today=state.records.filter(r=>r.shiftId===state.shiftId),curr=currentRecords();let qr=0,pos=0,cash=0,tips=0;
- for(const r of today){tips+=Number(r.tip||0);for(const p of(r.payments||[])){if(p.type==="QR")qr+=Number(p.sale||0);if(p.type==="POS")pos+=Number(p.sale||0);if(p.type==="EFECTIVO")cash+=Number(p.sale||0)}}
- $("sumActive").textContent=curr.filter(r=>r.status==="ACTIVE").length;$("sumPending").textContent=curr.filter(r=>r.status==="PAID_PENDING").length;$("sumTips").textContent=money(tips);
- $("stOpen").textContent=today.length;$("stClosed").textContent=today.filter(r=>r.status==="CLOSED").length;$("stActive").textContent=curr.filter(r=>r.status==="ACTIVE").length;$("stPending").textContent=curr.filter(r=>r.status==="PAID_PENDING").length;
- $("stQR").textContent=money(qr)+" Bs";$("stPOS").textContent=money(pos)+" Bs";$("stCash").textContent=money(cash)+" Bs";$("stTips").textContent=money(tips)+" Bs"
+function renderPending(){
+ const rows=currentRecords().filter(r=>r.status==="PAID_PENDING");
+ $("pendingList").innerHTML=rows.length?rows.map(r=>`<div class="row" onclick="openRecord(${r.id})">
+   <b>${r.table} · ${esc(r.client)}</b>
+   <div>Cuenta ${money(r.total)} Bs · ${r.payments.map(p=>p.type).join(" + ")} · Propina ${money(r.tip)} Bs ${qrPhotoCount(r)?`· 📷×${qrPhotoCount(r)}`:""}</div>
+   <div class="small">Pagada ${new Date(r.paidAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</div>
+ </div>`).join(""):`<div class="small">No tienes pagos pendientes.</div>`
 }
 function statusLabel(status){
  if(status==="ACTIVE")return "🟢 Activa";
@@ -357,13 +456,13 @@ function statusLabel(status){
 }
 function openHistoryDetail(id){
  const r=state.records.find(x=>x.id===id);if(!r)return;
- const payments=(r.payments||[]).map(p=>{
-   if(p.type==="QR")return `<div><b>QR venta:</b> ${money(p.sale)} Bs${p.received!=null?` · recibido ${money(p.received)} Bs`:""}</div>`;
-   if(p.type==="POS")return `<div><b>POS:</b> ${money(p.sale)} Bs</div>`;
-   if(p.type==="EFECTIVO")return `<div><b>Efectivo:</b> ${money(p.sale)} Bs</div>`;
-   return `<div><b>${esc(p.type)}:</b> ${money(p.sale||0)} Bs</div>`;
+ if(r.status!=="ACTIVE")recalcFinalAllocation(r);
+ const payments=(r.payments||[]).map((p,i)=>{
+   const base=p.type==="QR"
+     ?`QR ${i+1}: recibido ${money(p.received)} Bs · aplicado ${money(p.sale)} Bs${Number(p.tip||0)>0?` · propina ${money(p.tip)} Bs`:""} ${p.photo?"📷":""}`
+     :`${p.type} ${i+1}: ${money(p.received)} Bs`;
+   return `<div style="margin-top:5px"><b>${base}</b>${p.createdAt?`<div class="small">${new Date(p.createdAt).toLocaleString()}</div>`:""}</div>`
  }).join("");
- const hasQR=(r.payments||[]).some(p=>p.type==="QR");
  const opened=r.openedAt?new Date(r.openedAt).toLocaleString():"—";
  const paid=r.paidAt?new Date(r.paidAt).toLocaleString():"—";
  const closed=r.closedAt?new Date(r.closedAt).toLocaleString():"—";
@@ -372,23 +471,24 @@ function openHistoryDetail(id){
    <div style="margin-top:8px">${statusLabel(r.status)}</div>
    <hr>
    <div><b>Apertura:</b> ${opened}</div>
-   ${r.paidAt?`<div><b>Pago registrado:</b> ${paid}</div>`:""}
+   ${r.paidAt?`<div><b>Pago completado:</b> ${paid}</div>`:""}
    ${r.closedAt?`<div><b>Cierre:</b> ${closed}</div>`:""}
    ${r.total!=null?`<div style="margin-top:10px"><b>Total cuenta:</b> ${money(r.total)} Bs</div>`:""}
+   ${(r.payments||[]).length?`<div><b>Total recibido:</b> ${money(totalReceived(r))} Bs</div>`:""}
    ${payments?`<div style="margin-top:8px">${payments}</div>`:""}
-   ${r.tip!=null?`<div style="margin-top:6px"><b>Propina QR:</b> ${money(r.tip)} Bs</div>`:""}
+   ${r.tip!=null?`<div style="margin-top:6px"><b>Propina QR total:</b> ${money(r.tip)} Bs</div>`:""}
    ${r.note?`<div class="notice" style="margin-top:10px"><b>Nota:</b><br>${esc(r.note)}</div>`:""}
-   ${r.photo?`<div style="margin-top:12px"><b>Comprobante QR:</b></div><img class="photo" src="${r.photo}" alt="Comprobante QR">`:hasQR?`<div class="notice warn" style="margin-top:12px">Este registro tiene pago QR, pero no tiene foto guardada.</div>`:""}
+   ${paymentPhotoGallery(r)}
    <div class="actions"><button class="secondary" onclick="closeDlg()">Cerrar</button></div>`);
 }
 function toggleHistory(){
  $("historyWrap").classList.toggle("hidden");
  $("historyList").innerHTML=[...state.records].reverse().map(r=>`
    <div class="row" onclick="openHistoryDetail(${r.id})" style="cursor:pointer">
-     <b>${r.table} · ${esc(r.client)} ${r.photo?"📷":""}</b>
+     <b>${r.table} · ${esc(r.client)} ${qrPhotoCount(r)?`📷×${qrPhotoCount(r)}`:""}</b>
      <div>${r.shiftId} · ${statusLabel(r.status)}</div>
-     <div>${r.total!=null?`Cuenta ${money(r.total)} Bs · Propina ${money(r.tip)} Bs`:""}</div>
-     <div class="small">Toca para ver detalle${r.photo?" y comprobante QR":""}</div>
+     <div>${r.total!=null?`Cuenta ${money(r.total)} Bs · Recibido ${money(totalReceived(r))} Bs · Propina ${money(r.tip)} Bs`:""}</div>
+     <div class="small">Toca para ver pagos${qrPhotoCount(r)?" y comprobantes QR":""}</div>
    </div>`).join("");
 }
 function endShift(){const curr=currentRecords();if(curr.length)return alert(`No puedes cerrar todavía: tienes ${curr.length} cuenta(s) activa(s) o pendiente(s).`);if(confirm("¿Cerrar turno e iniciar uno nuevo? El historial se conserva.")){state.shiftId=localDate()+"-"+Date.now();save()}}
