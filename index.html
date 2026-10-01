@@ -349,7 +349,48 @@ function renderStats(){
  $("stOpen").textContent=today.length;$("stClosed").textContent=today.filter(r=>r.status==="CLOSED").length;$("stActive").textContent=curr.filter(r=>r.status==="ACTIVE").length;$("stPending").textContent=curr.filter(r=>r.status==="PAID_PENDING").length;
  $("stQR").textContent=money(qr)+" Bs";$("stPOS").textContent=money(pos)+" Bs";$("stCash").textContent=money(cash)+" Bs";$("stTips").textContent=money(tips)+" Bs"
 }
-function toggleHistory(){$("historyWrap").classList.toggle("hidden");$("historyList").innerHTML=[...state.records].reverse().map(r=>`<div class="row"><b>${r.table} · ${esc(r.client)}</b><div>${r.shiftId} · ${r.status}</div><div>${r.total!=null?`Cuenta ${money(r.total)} Bs · Propina ${money(r.tip)} Bs`:""}</div></div>`).join("")}
+function statusLabel(status){
+ if(status==="ACTIVE")return "🟢 Activa";
+ if(status==="PAID_PENDING")return "🟠 Pagada / pendiente";
+ if(status==="CLOSED")return "✅ Cerrada";
+ return status;
+}
+function openHistoryDetail(id){
+ const r=state.records.find(x=>x.id===id);if(!r)return;
+ const payments=(r.payments||[]).map(p=>{
+   if(p.type==="QR")return `<div><b>QR venta:</b> ${money(p.sale)} Bs${p.received!=null?` · recibido ${money(p.received)} Bs`:""}</div>`;
+   if(p.type==="POS")return `<div><b>POS:</b> ${money(p.sale)} Bs</div>`;
+   if(p.type==="EFECTIVO")return `<div><b>Efectivo:</b> ${money(p.sale)} Bs</div>`;
+   return `<div><b>${esc(p.type)}:</b> ${money(p.sale||0)} Bs</div>`;
+ }).join("");
+ const hasQR=(r.payments||[]).some(p=>p.type==="QR");
+ const opened=r.openedAt?new Date(r.openedAt).toLocaleString():"—";
+ const paid=r.paidAt?new Date(r.paidAt).toLocaleString():"—";
+ const closed=r.closedAt?new Date(r.closedAt).toLocaleString():"—";
+ showDlg(`<h2>${r.table}</h2>
+   <div class="client">${esc(r.client)}</div>
+   <div style="margin-top:8px">${statusLabel(r.status)}</div>
+   <hr>
+   <div><b>Apertura:</b> ${opened}</div>
+   ${r.paidAt?`<div><b>Pago registrado:</b> ${paid}</div>`:""}
+   ${r.closedAt?`<div><b>Cierre:</b> ${closed}</div>`:""}
+   ${r.total!=null?`<div style="margin-top:10px"><b>Total cuenta:</b> ${money(r.total)} Bs</div>`:""}
+   ${payments?`<div style="margin-top:8px">${payments}</div>`:""}
+   ${r.tip!=null?`<div style="margin-top:6px"><b>Propina QR:</b> ${money(r.tip)} Bs</div>`:""}
+   ${r.note?`<div class="notice" style="margin-top:10px"><b>Nota:</b><br>${esc(r.note)}</div>`:""}
+   ${r.photo?`<div style="margin-top:12px"><b>Comprobante QR:</b></div><img class="photo" src="${r.photo}" alt="Comprobante QR">`:hasQR?`<div class="notice warn" style="margin-top:12px">Este registro tiene pago QR, pero no tiene foto guardada.</div>`:""}
+   <div class="actions"><button class="secondary" onclick="closeDlg()">Cerrar</button></div>`);
+}
+function toggleHistory(){
+ $("historyWrap").classList.toggle("hidden");
+ $("historyList").innerHTML=[...state.records].reverse().map(r=>`
+   <div class="row" onclick="openHistoryDetail(${r.id})" style="cursor:pointer">
+     <b>${r.table} · ${esc(r.client)} ${r.photo?"📷":""}</b>
+     <div>${r.shiftId} · ${statusLabel(r.status)}</div>
+     <div>${r.total!=null?`Cuenta ${money(r.total)} Bs · Propina ${money(r.tip)} Bs`:""}</div>
+     <div class="small">Toca para ver detalle${r.photo?" y comprobante QR":""}</div>
+   </div>`).join("");
+}
 function endShift(){const curr=currentRecords();if(curr.length)return alert(`No puedes cerrar todavía: tienes ${curr.length} cuenta(s) activa(s) o pendiente(s).`);if(confirm("¿Cerrar turno e iniciar uno nuevo? El historial se conserva.")){state.shiftId=localDate()+"-"+Date.now();save()}}
 function renderAll(){renderTables();renderSearch();renderPending();renderStats()}
 $("quickSearch").addEventListener("input",renderTables);$("searchInput").addEventListener("input",renderSearch);
