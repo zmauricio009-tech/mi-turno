@@ -69,7 +69,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 </section>
 
 <section id="viewShift" class="view">
-  <h2>Mi turno</h2>
+  <h2>Mi turno</h2><div class="notice">🗂️ Historial cerrado y fotos QR: conservación automática de 15 días. Las cuentas activas o pendientes no se eliminan hasta resolverse.</div>
   <div class="row">
     <div class="kv">
       <div><div class="small">Aperturas</div><div class="metric" id="stOpen">0</div></div>
@@ -107,7 +107,89 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 <script>
 const GROUPS={"M":20,"GALERIA":15,"MIRADOR":7,"PISCINA":20,"CABAÑA":11,"P.A":7,"P.E":7,"P.B":11,"P.C":15,"P.D":9};
 const KEY="mi_turno_pwa_v1";
-let state=JSON.parse(localStorage.getItem(KEY)||"null")||{records:[],nextId:1,shiftId:localDate()};
+const DB_NAME="mi_turno_db";
+const DB_VERSION=1;
+const STORE_NAME="app";
+const DATA_RETENTION_DAYS=15;
+
+let state={records:[],nextId:1,shiftId:localDate()};
+
+function openDB(){
+ return new Promise((resolve,reject)=>{
+  const req=indexedDB.open(DB_NAME,DB_VERSION);
+  req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains(STORE_NAME))db.createObjectStore(STORE_NAME)};
+  req.onsuccess=()=>resolve(req.result);
+  req.onerror=()=>reject(req.error);
+ });
+}
+async function idbGet(key){
+ const db=await openDB();
+ return await new Promise((resolve,reject)=>{
+  const tx=db.transaction(STORE_NAME,"readonly");
+  const req=tx.objectStore(STORE_NAME).get(key);
+  req.onsuccess=()=>resolve(req.result);
+  req.onerror=()=>reject(req.error);
+ });
+}
+async function idbSet(key,value){
+ const db=await openDB();
+ return await new Promise((resolve,reject)=>{
+  const tx=db.transaction(STORE_NAME,"readwrite");
+  tx.objectStore(STORE_NAME).put(value,key);
+  tx.oncomplete=()=>resolve();
+  tx.onerror=()=>reject(tx.error);
+ });
+}
+async function loadState(){
+ let stored=null;
+ try{stored=await idbGet("state")}catch(e){}
+ if(stored)return stored;
+
+ // Migración automática desde la versión anterior basada en localStorage.
+ try{
+  const legacy=JSON.parse(localStorage.getItem(KEY)||"null");
+  if(legacy){
+   await idbSet("state",legacy);
+   localStorage.removeItem(KEY);
+   return legacy;
+  }
+ }catch(e){}
+ return {records:[],nextId:1,shiftId:localDate()};
+}
+function recordTimestamp(r){
+ const raw=r.closedAt || r.paidAt || r.openedAt;
+ const ts=Date.parse(raw||"");
+ return Number.isFinite(ts)?ts:null;
+}
+async function cleanupOldData(){
+ const cutoff=Date.now()-(DATA_RETENTION_DAYS*24*60*60*1000);
+ let changed=false;
+ const kept=[];
+ for(const r of state.records){
+  const ts=recordTimestamp(r);
+
+  // Toda foto con más de 15 días se elimina.
+  if(r.photo && ts!==null && ts<cutoff){
+   r.photo=null;
+   changed=true;
+  }
+
+  // El historial CERRADO se conserva 15 días.
+  // Activas y pendientes se protegen para no perder cuentas sin resolver.
+  if(r.status==="CLOSED" && ts!==null && ts<cutoff){
+   changed=true;
+   continue;
+  }
+  kept.push(r);
+ }
+ if(kept.length!==state.records.length)state.records=kept;
+ if(changed)await idbSet("state",state);
+}
+async function persistState(){
+ try{await idbSet("state",state)}
+ catch(e){console.error("No se pudo guardar Mi Turno",e);alert("No se pudo guardar la información. Revisa el almacenamiento del navegador.")}
+}
+
 let zone="TODAS", payMode="QR", creating=false;
 const $=id=>document.getElementById(id);
 const money=n=>Number(n||0).toFixed(2);
@@ -115,7 +197,7 @@ const now=()=>new Date().toISOString();
 function localDate(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`}
 const esc=s=>String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
 
-function save(){localStorage.setItem(KEY,JSON.stringify(state));renderAll()}
+function save(){persistState();renderAll()}
 function allTables(){let a=[];for(const [z,n] of Object.entries(GROUPS))for(let i=1;i<=n;i++)a.push({zone:z,label:`${z} ${i}`});return a}
 function currentRecords(){return state.records.filter(r=>r.shiftId===state.shiftId&&(r.status==="ACTIVE"||r.status==="PAID_PENDING"))}
 function currentFor(table){return currentRecords().find(r=>r.table===table)}
@@ -273,8 +355,13 @@ function renderAll(){renderTables();renderSearch();renderPending();renderStats()
 $("quickSearch").addEventListener("input",renderTables);$("searchInput").addEventListener("input",renderSearch);
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>goView(b.dataset.view));
 $("voiceBtn").onclick=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR)return alert("La búsqueda por voz no está disponible en este navegador.");const rec=new SR();rec.lang="es-ES";rec.onresult=e=>{$("quickSearch").value=e.results[0][0].transcript;renderTables()};rec.start()};
-renderAll();
-if("serviceWorker" in navigator)navigator.serviceWorker.register("./sw.js");
+async function startApp(){
+ state=await loadState();
+ await cleanupOldData();
+ renderAll();
+ if("serviceWorker" in navigator)navigator.serviceWorker.register("./sw.js");
+}
+startApp();
 </script>
 </body>
 </html>
