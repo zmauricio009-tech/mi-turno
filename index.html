@@ -301,7 +301,10 @@ function recalcFinalAllocation(r){
 function allTables(){let a=[];for(const [z,n] of Object.entries(GROUPS))for(let i=1;i<=n;i++)a.push({zone:z,label:`${z} ${i}`});return a}
 function currentRecords(){return state.records.filter(r=>r.shiftId===state.shiftId&&(r.status==="ACTIVE"||r.status==="PAID_PENDING"))}
 function currentFor(table){return currentRecords().find(r=>r.table===table)}
-function showDlg(html){$("dlgBody").innerHTML=html;$("dlg").showModal()}
+function showDlg(html){
+ $("dlgBody").innerHTML=html;
+ if(!$("dlg").open)$("dlg").showModal();
+}
 function closeDlg(){if($("dlg").open)$("dlg").close()}
 function goView(id){
  document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("active",x.dataset.view===id));
@@ -393,6 +396,7 @@ function openRecord(id){
      <button class="secondary" onclick="rename(${id})">Cambiar nombre</button>
      <button class="secondary" onclick="move(${id})">Cambiar mesa</button>
      <button class="secondary" onclick="note(${id})">Agregar nota</button>
+     <button class="danger" onclick="cancelOpening(${id},this)">Anular apertura</button>
    </div>`)
  }else{
    const finalized=recalcFinalAllocation(r);
@@ -407,6 +411,35 @@ function openRecord(id){
      <button class="secondary" onclick="rename(${id})">Cambiar nombre</button>
      <button class="secondary" onclick="move(${id})">Cambiar mesa</button>
    </div>`)
+ }
+}
+
+
+async function cancelOpening(id,btn){
+ const r=state.records.find(x=>x.id===id);if(!r||r.status!=="ACTIVE")return;
+ const payCount=(r.payments||[]).length;
+ const photoCount=qrPhotoCount(r);
+ const msg=payCount
+   ?`Esta mesa tiene ${payCount} pago(s) registrado(s) y ${photoCount} foto(s) QR.\n\nSi continúas, se eliminará TODO y no quedará en el historial.\n\n¿Anular ${r.table} / ${r.client}?`
+   :`¿Anular la apertura de ${r.table} / ${r.client}?\n\nLa mesa volverá a Libre y este registro no quedará en el historial.`;
+ if(!confirm(msg))return;
+
+ if(btn){
+   btn.disabled=true;
+   btn.textContent="Anulando...";
+ }
+ try{
+   state.records=state.records.filter(x=>x.id!==id);
+   await persistState();
+   renderAll();
+   closeDlg();
+ }catch(e){
+   console.error(e);
+   if(btn){
+     btn.disabled=false;
+     btn.textContent="Anular apertura";
+   }
+   alert("No se pudo anular la apertura. Intenta otra vez.");
  }
 }
 
@@ -459,6 +492,11 @@ async function saveQuickQrAdd(id){
    btn.style.color="#111";
  }
 
+ const oldTotal=r.total;
+ const oldTip=r.tip;
+ const oldLen=(r.payments||[]).length;
+ let persisted=false;
+
  try{
    const photo=await compressPhoto($("quickQrPhoto"));
 
@@ -475,6 +513,7 @@ async function saveQuickQrAdd(id){
    r.tip=Math.max(0,totalReceived(r)-Number(r.total||0));
 
    await persistState();
+   persisted=true;
    renderAll();
 
    if(btn){
@@ -482,7 +521,7 @@ async function saveQuickQrAdd(id){
      btn.style.background="#22c55e";
      btn.style.color="#08120b";
    }
-   await new Promise(res=>setTimeout(res,450));
+   await new Promise(res=>setTimeout(res,650));
 
    showDlg(`<h2>Pago guardado</h2>
      <div class="notice good">
@@ -497,7 +536,15 @@ async function saveQuickQrAdd(id){
      </div>`);
  }catch(e){
    console.error(e);
-   alert("No se pudo guardar el movimiento. Intenta otra vez.");
+   if(!persisted){
+     r.payments.splice(oldLen);
+     r.total=oldTotal;
+     r.tip=oldTip;
+     alert("No se pudo guardar el movimiento. Intenta otra vez.");
+   }else{
+     // El movimiento ya quedó guardado; evitamos mostrar un falso error.
+     openRecord(id);
+   }
  }finally{
    quickQrSaving=false;
    if(btn){
