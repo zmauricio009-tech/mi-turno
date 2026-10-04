@@ -70,7 +70,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 </head>
 <body>
 <header>
-<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">FAST 1.13</span></h1>
+<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">DIRECT 1.14</span></h1>
 <div class="topstats">
   <div class="pill" onclick="goView('viewActive')">🟢 Activas <b id="sumActive">0</b></div>
   <div class="pill" onclick="goView('viewPending')">🟠 Pendientes <b id="sumPending">0</b></div>
@@ -146,17 +146,25 @@ const DATA_RETENTION_DAYS=15;
 
 let state={records:[],nextId:1,shiftId:localDate()};
 
+let dbPromise=null;
 function openDB(){
- return new Promise((resolve,reject)=>{
+ if(dbPromise)return dbPromise;
+ dbPromise=new Promise((resolve,reject)=>{
   const req=indexedDB.open(DB_NAME,DB_VERSION);
   req.onupgradeneeded=()=>{
    const db=req.result;
    if(!db.objectStoreNames.contains(STORE_NAME))db.createObjectStore(STORE_NAME);
    if(!db.objectStoreNames.contains(PHOTO_STORE))db.createObjectStore(PHOTO_STORE);
   };
-  req.onsuccess=()=>resolve(req.result);
-  req.onerror=()=>reject(req.error);
+  req.onsuccess=()=>{
+   const db=req.result;
+   db.onversionchange=()=>{try{db.close()}catch(_){} dbPromise=null};
+   resolve(db);
+  };
+  req.onerror=()=>{dbPromise=null;reject(req.error)};
+  req.onblocked=()=>console.warn("IndexedDB bloqueada temporalmente");
  });
+ return dbPromise;
 }
 async function idbGet(key){
  const db=await openDB();
@@ -301,6 +309,18 @@ async function cleanupOldData(){
 async function persistState(){
  await idbSet("state",state);
 }
+let saveQueue=Promise.resolve();
+function persistStateBackground(){
+ const snapshot=structuredClone(state);
+ saveQueue=saveQueue
+   .catch(()=>{})
+   .then(()=>idbSet("state",snapshot))
+   .catch(err=>{
+     console.error("Guardado en segundo plano",err);
+     setTimeout(()=>alert("No se pudo guardar un cambio. Revisa la conexión de la app y vuelve a intentarlo."),0);
+   });
+ return saveQueue;
+}
 
 let zone="TODAS", payMode="QR", creating=false;
 const $=id=>document.getElementById(id);
@@ -435,29 +455,27 @@ function openFree(table){
 }
 async function createRecord(table){
  const btn=$("openBtn");
- if(creating || !beginActionSave("createRecord",btn,"Guardando..."))return;
+ if(creating)return;
  const name=$("newClient").value.trim();
- if(!name){failActionSave("createRecord",btn);return alert("Escribe el nombre del cliente.");}
+ if(!name)return alert("Escribe el nombre del cliente.");
  const existing=currentFor(table);
- if(existing){failActionSave("createRecord",btn);closeDlg();openRecord(existing.id);return}
+ if(existing){closeDlg();openRecord(existing.id);return}
+
  creating=true;
  const record={id:state.nextId++,table,client:name,status:"ACTIVE",openedAt:now(),shiftId:state.shiftId,note:"",total:null,payments:[],tip:0,photo:null};
  state.records.push(record);
- try{
-   await uiTick();
-   await persistState();
-   renderAll();
-   await finishActionSave("createRecord",btn,"Guardada ✓",100);
-   closeDlg();
-   goView("viewTables");
- }catch(e){
-   console.error(e);
-   state.records=state.records.filter(r=>r.id!==record.id);
-   state.nextId=Math.max(1,state.nextId-1);
-   renderAll();
-   failActionSave("createRecord",btn);
-   alert("No se pudo guardar la mesa. Intenta otra vez.");
- }finally{creating=false}
+
+ // Respuesta inmediata: no esperar IndexedDB para actualizar la pantalla.
+ if(btn){
+   btn.disabled=true;
+   btn.textContent="✓";
+   btn.style.background="#22c55e";
+   btn.style.color="#08120b";
+ }
+ renderAll();
+ closeDlg();
+ goView("viewTables");
+ persistStateBackground().finally(()=>{creating=false});
 }
 function paymentRows(r,withDelete=false){
  const rows=(r.payments||[]).map((p,i)=>{
@@ -527,20 +545,15 @@ async function cancelOpening(id,btn){
    ?`Esta mesa tiene ${payCount} pago(s) registrado(s) y ${photoCount} foto(s).\n\nSi continúas, se eliminará TODO y no quedará en el historial.\n\n¿Anular ${r.table} / ${r.client}?`
    :`¿Anular la apertura de ${r.table} / ${r.client}?\n\nLa mesa volverá a Libre y este registro no quedará en el historial.`;
  if(!confirm(msg))return;
- const key="cancel-"+id;
- if(!beginActionSave(key,btn,"Anulando..."))return;
- try{
-   await uiTick();
-   await deleteRecordPhotos(r);
-   state.records=state.records.filter(x=>x.id!==id);
-   await persistState();renderAll();
-   await finishActionSave(key,btn,"Anulada ✓",100);
-   closeDlg();
- }catch(e){
-   console.error(e);failActionSave(key,btn);alert("No se pudo anular la apertura. Intenta otra vez.");
- }
-}
 
+ if(btn){btn.disabled=true;btn.textContent="✓";btn.style.background="#22c55e";btn.style.color="#08120b"}
+ state.records=state.records.filter(x=>x.id!==id);
+ renderAll();closeDlg();
+
+ // limpieza y persistencia en segundo plano
+ deleteRecordPhotos(r).catch(console.warn);
+ persistStateBackground();
+}
 function photoPicked(input,labelId){
  const label=$(labelId);if(!label)return;
  if(input?.files?.length){label.textContent="📷 Foto lista ✓";label.classList.add("ready")}
@@ -566,80 +579,82 @@ function openQuickPayment(id,type){
 }
 async function saveQuickPayment(id,type){
  const btn=$("quickPaymentSaveBtn"),key=`quick-${id}-${type}`;
- if(!beginActionSave(key,btn,"Guardando..."))return;
- const r=state.records.find(x=>x.id===id);if(!r){failActionSave(key,btn);return}
+ if(actionLocks[key])return;
+ const r=state.records.find(x=>x.id===id);if(!r)return;
  const amount=Number($("quickPayAmount").value);
- if(!Number.isFinite(amount)||amount<=0){failActionSave(key,btn);return alert("Escribe un monto válido.");}
+ if(!Number.isFinite(amount)||amount<=0)return alert("Escribe un monto válido.");
+
+ actionLocks[key]=true;
+ if(btn){
+   btn.disabled=true;
+   btn.textContent="✓";
+   btn.style.background="#22c55e";
+   btn.style.color="#08120b";
+ }
+
  let photoKey=null;
- const payment={type,received:amount,sale:amount,tip:0,createdAt:now(),photoKey:null};
  try{
-   await uiTick();
+   let photoData=null;
    if(type==="QR"||type==="POS"){
      const input=$("quickPayPhoto");
-     if(!input?.files?.length){failActionSave(key,btn);return alert(`Toma la foto del comprobante ${type}.`)}
-     btn.textContent="Procesando foto...";
-     btn.style.background="#f59e0b";
-     await uiTick();
-     const photoData=await compressPhoto(input);
+     if(!input?.files?.length){
+       actionLocks[key]=false;
+       if(btn){btn.disabled=false;btn.textContent=`Guardar ${type}`;btn.style.background="";btn.style.color=""}
+       return alert(`Toma la foto del comprobante ${type}.`);
+     }
+     photoData=await compressPhoto(input);
      photoKey=newPhotoKey(id,type);
      await idbPhotoSet(photoKey,photoData);
-     payment.photoKey=photoKey;
    }
-   r.payments.push(payment);
-   await persistState();
+
+   r.payments.push({type,received:amount,sale:amount,tip:0,createdAt:now(),photoKey});
    renderAll();
-   await finishActionSave(key,btn,"Guardado ✓",100);
+
+   // volver inmediatamente al mismo registro para continuar cargando.
    openQuickPayment(id,type);
+   persistStateBackground();
  }catch(e){
    console.error(e);
-   const idx=r.payments.indexOf(payment);
-   if(idx>=0)r.payments.splice(idx,1);
    if(photoKey){try{await idbPhotoDelete(photoKey)}catch(_){}}
-   failActionSave(key,btn);
    alert("No se pudo guardar el movimiento. Intenta otra vez.");
+ }finally{
+   actionLocks[key]=false;
  }
 }
-
-function rename(id){const r=state.records.find(x=>x.id===id);showDlg(`<h2>Cambiar nombre</h2><input id="renameInput" value="${esc(r.client)}"><div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button id="renameSaveBtn" onclick="saveRename(${id})">Guardar</button></div>`)}
-async function saveRename(id){
- const btn=$("renameSaveBtn");if(!beginActionSave("rename-"+id,btn))return;
- const r=state.records.find(x=>x.id===id),v=$("renameInput").value.trim();
- if(!v){failActionSave("rename-"+id,btn);return alert("Escribe un nombre.");}
- try{await uiTick();r.client=v;await persistState();renderAll();await finishActionSave("rename-"+id,btn,"Guardado ✓",100);openRecord(id)}
- catch(e){console.error(e);failActionSave("rename-"+id,btn);alert("No se pudo guardar el nombre.")}
-}
-function move(id){const r=state.records.find(x=>x.id===id);showDlg(`<h2>Cambiar mesa</h2><select id="moveSel">${allTables().map(t=>`<option ${t.label===r.table?"selected":""}>${t.label}</option>`).join("")}</select><div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button id="moveSaveBtn" onclick="saveMove(${id})">Guardar</button></div>`)}
-async function saveMove(id){
- const btn=$("moveSaveBtn");if(!beginActionSave("move-"+id,btn))return;
- const r=state.records.find(x=>x.id===id),dest=$("moveSel").value,ex=currentFor(dest);
- if(ex&&ex.id!==id){failActionSave("move-"+id,btn);return alert(`${dest} ya está en uso por ${ex.client}.`);}
- try{await uiTick();r.table=dest;await persistState();renderAll();await finishActionSave("move-"+id,btn,"Guardado ✓",100);openRecord(id)}
- catch(e){console.error(e);failActionSave("move-"+id,btn);alert("No se pudo guardar el cambio de mesa.")}
-}
-function note(id){const r=state.records.find(x=>x.id===id);showDlg(`<h2>Agregar nota</h2><textarea id="noteInput" rows="4">${esc(r.note||"")}</textarea><div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button id="noteSaveBtn" onclick="saveNote(${id})">Guardar</button></div>`)}
-async function saveNote(id){
- const btn=$("noteSaveBtn");if(!beginActionSave("note-"+id,btn))return;
- const r=state.records.find(x=>x.id===id);
- try{await uiTick();r.note=$("noteInput").value.trim();await persistState();renderAll();await finishActionSave("note-"+id,btn,"Guardado ✓",100);openRecord(id)}
- catch(e){console.error(e);failActionSave("note-"+id,btn);alert("No se pudo guardar la nota.")}
-}
-
-function closeSummaryHTML(r,total){
- const qr=totalByType(r,"QR"),pos=totalByType(r,"POS"),cash=totalByType(r,"EFECTIVO"),received=qr+pos+cash;
- let html=`<div><b>QR:</b> ${money(qr)} Bs · <b>POS:</b> ${money(pos)} Bs · <b>Efectivo:</b> ${money(cash)} Bs</div>
- <div style="margin-top:5px"><b>Total recibido:</b> ${money(received)} Bs</div>`;
- if(Number.isFinite(total)&&total>0){
-   const falta=Math.max(0,total-received),over=Math.max(0,received-total);
-   html+=`<div style="margin-top:5px"><b>Cuenta:</b> ${money(total)} Bs · <b>Falta:</b> ${money(falta)} Bs</div>`;
-   if(pos+cash>total+.01)html+=`<div style="margin-top:5px;color:#ff9aa2"><b>Revisar:</b> POS + efectivo superan el total de la cuenta.</div>`;
-   else if(over>0)html+=`<div style="margin-top:5px;color:#86efac"><b>Propina QR estimada:</b> ${money(over)} Bs</div>`;
- }
- return html;
-}
-function updateCloseSummary(id){
+function rename(id){
  const r=state.records.find(x=>x.id===id);if(!r)return;
- const total=Number($("accountTotalInput")?.value),box=$("closeSummary");
- if(box)box.innerHTML=closeSummaryHTML(r,total);
+ showDlg(`<h2>Cambiar nombre</h2><input id="renameInput" value="${esc(r.client)}"><div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button id="renameSaveBtn" class="green" onclick="saveRenameDirect(${id})">Guardar</button></div>`)
+}
+function saveRenameDirect(id){
+ const r=state.records.find(x=>x.id===id),btn=$("renameSaveBtn");if(!r)return;
+ const v=$("renameInput").value.trim();if(!v)return alert("Escribe el nombre.");
+ r.client=v;
+ if(btn){btn.disabled=true;btn.textContent="✓";btn.style.background="#22c55e";btn.style.color="#08120b"}
+ renderAll();openRecord(id);persistStateBackground();
+}
+function move(id){
+ const r=state.records.find(x=>x.id===id);if(!r)return;
+ const options=allTables().filter(t=>!currentFor(t.label)||t.label===r.table).map(t=>`<option value="${t.label}" ${t.label===r.table?"selected":""}>${t.label}</option>`).join("");
+ showDlg(`<h2>Cambiar mesa</h2><select id="moveSelect">${options}</select><div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button id="moveSaveBtn" class="green" onclick="saveMoveDirect(${id})">Guardar</button></div>`)
+}
+function saveMoveDirect(id){
+ const r=state.records.find(x=>x.id===id),btn=$("moveSaveBtn");if(!r)return;
+ const dest=$("moveSelect").value;
+ const occupied=currentFor(dest);
+ if(occupied&&occupied.id!==id)return alert("Esa mesa ya está ocupada.");
+ r.table=dest;
+ if(btn){btn.disabled=true;btn.textContent="✓";btn.style.background="#22c55e";btn.style.color="#08120b"}
+ renderAll();openRecord(id);persistStateBackground();
+}
+function note(id){
+ const r=state.records.find(x=>x.id===id);if(!r)return;
+ showDlg(`<h2>Agregar nota</h2><textarea id="noteInput">${esc(r.note||"")}</textarea><div class="actions"><button class="secondary" onclick="openRecord(${id})">Volver</button><button id="noteSaveBtn" class="green" onclick="saveNoteDirect(${id})">Guardar</button></div>`)
+}
+function saveNoteDirect(id){
+ const r=state.records.find(x=>x.id===id),btn=$("noteSaveBtn");if(!r)return;
+ r.note=$("noteInput").value.trim();
+ if(btn){btn.disabled=true;btn.textContent="✓";btn.style.background="#22c55e";btn.style.color="#08120b"}
+ renderAll();openRecord(id);persistStateBackground();
 }
 function openPaymentManager(id){
  const r=state.records.find(x=>x.id===id);if(!r)return;
@@ -669,41 +684,28 @@ async function deletePayment(id,index,btn){
  const r=state.records.find(x=>x.id===id);
  if(!r||!r.payments[index])return;
  if(!confirm(`¿Eliminar el pago ${index+1} de ${r.table}?`))return;
- const key=`delete-${id}-${index}`;
- if(!beginActionSave(key,btn,"Eliminando..."))return;
  const payment=r.payments[index];
- try{
-   await uiTick();
-   r.payments.splice(index,1);
-   if(payment?.photoKey){try{await idbPhotoDelete(payment.photoKey)}catch(e){console.warn(e)}}
-   if(r.status==="PAID_PENDING" && (!r.total || totalReceived(r)<Number(r.total)-.01)){r.status="ACTIVE";r.paidAt=null}
-   await persistState();renderAll();
-   await finishActionSave(key,btn,"Eliminado ✓",100);
-   openPaymentManager(id);
- }catch(e){
-   console.error(e);failActionSave(key,btn);alert("No se pudo eliminar el pago.");
- }
+ r.payments.splice(index,1);
+ if(r.status==="PAID_PENDING" && (!r.total || totalReceived(r)<Number(r.total)-.01)){r.status="ACTIVE";r.paidAt=null}
+ if(btn){btn.disabled=true;btn.textContent="✓";btn.style.background="#22c55e";btn.style.color="#08120b"}
+ renderAll();openPaymentManager(id);
+ if(payment?.photoKey)idbPhotoDelete(payment.photoKey).catch(console.warn);
+ persistStateBackground();
 }
-
 async function finalizePayments(id){
- const btn=$("finalizeSaveBtn"),key="finalize-"+id;
- if(!beginActionSave(key,btn,"Procesando..."))return;
+ const btn=$("finalizeSaveBtn");
  const r=state.records.find(x=>x.id===id),v=Number($("accountTotalInput")?.value);
- if(!Number.isFinite(v)||v<=0){failActionSave(key,btn);return alert("Escribe el total real de Restotech.");}
+ if(!Number.isFinite(v)||v<=0)return alert("Escribe el total real de Restotech.");
  r.total=v;
  const result=recalcFinalAllocation(r);
- if(!result.ok){failActionSave(key,btn);return alert(result.msg)}
- try{
-   await uiTick();
-   r.status="PAID_PENDING";r.paidAt=now();
-   await persistState();renderAll();
-   await finishActionSave(key,btn,"Listo ✓",100);
-   openRecord(id);
- }catch(e){
-   console.error(e);failActionSave(key,btn);alert("No se pudo finalizar el pago.");
- }
-}
+ if(!result.ok)return alert(result.msg);
 
+ r.status="PAID_PENDING";r.paidAt=now();
+ if(btn){btn.disabled=true;btn.textContent="✓";btn.style.background="#22c55e";btn.style.color="#08120b"}
+ renderAll();
+ openRecord(id);
+ persistStateBackground();
+}
 let paymentGalleryRecordId=null;
 let paymentGalleryType="QR";
 let paymentGalleryPage=0;
@@ -770,19 +772,11 @@ async function compressPhoto(input){
 async function confirmClose(id,btn){
  const r=state.records.find(x=>x.id===id);if(!r)return;
  if(!confirm(`¿Confirmas que ${r.table} / ${r.client} ya quedó cerrada en caja?`))return;
- const key="close-"+id;
- if(!beginActionSave(key,btn,"Cerrando..."))return;
- try{
-   await uiTick();
-   r.status="CLOSED";r.closedAt=now();
-   await persistState();renderAll();
-   await finishActionSave(key,btn,"Cerrada ✓",100);
-   closeDlg();
- }catch(e){
-   console.error(e);failActionSave(key,btn);alert("No se pudo cerrar la mesa.");
- }
+ r.status="CLOSED";r.closedAt=now();
+ if(btn){btn.disabled=true;btn.textContent="✓";btn.style.background="#22c55e";btn.style.color="#08120b"}
+ renderAll();closeDlg();
+ persistStateBackground();
 }
-
 function renderActive(){
  const rows=currentRecords().filter(r=>r.status==="ACTIVE");
  $("activeList").innerHTML=rows.length?rows.map(r=>`<div class="row" onclick="openRecord(${r.id})">
