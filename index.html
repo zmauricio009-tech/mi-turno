@@ -70,7 +70,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 </head>
 <body>
 <header>
-<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">DIRECT 1.14</span></h1>
+<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">HOTFIX 1.15</span></h1>
 <div class="topstats">
   <div class="pill" onclick="goView('viewActive')">🟢 Activas <b id="sumActive">0</b></div>
   <div class="pill" onclick="goView('viewPending')">🟠 Pendientes <b id="sumPending">0</b></div>
@@ -312,14 +312,15 @@ async function persistState(){
 let saveQueue=Promise.resolve();
 function persistStateBackground(){
  const snapshot=structuredClone(state);
+
  saveQueue=saveQueue
    .catch(()=>{})
    .then(()=>idbSet("state",snapshot))
    .catch(err=>{
      console.error("Guardado en segundo plano",err);
-     setTimeout(()=>alert("No se pudo guardar un cambio. Revisa la conexión de la app y vuelve a intentarlo."),0);
    });
- return saveQueue;
+
+ return true;
 }
 
 let zone="TODAS", payMode="QR", creating=false;
@@ -448,34 +449,66 @@ function renderTables(){
  }).join("")
 }
 function openFree(table){
- if(currentFor(table)){openRecord(currentFor(table).id);return}
- showDlg(`<h2>${table}</h2><label>Nombre del cliente</label><input id="newClient" placeholder="Ej. Pedro">
- <div class="actions"><button class="secondary" onclick="closeDlg()">Cancelar</button><button id="openBtn" class="green" onclick="createRecord('${table}')">Abrir mesa</button></div>`);
- setTimeout(()=>$("newClient")?.focus(),80)
+ creating=false;
+
+ if($("dlg")?.open){
+   try{$("dlg").close()}catch(_){}
+ }
+
+ showDlg(`<h2>${table}</h2>
+ <label>Nombre del cliente</label>
+ <input id="newClient" placeholder="Ej. Pedro">
+ <div class="actions">
+   <button class="secondary" onclick="closeDlg()">Cancelar</button>
+   <button id="openBtn" class="green" onclick="createRecord('${table}')">Abrir mesa</button>
+ </div>`);
+
+ setTimeout(()=>$("newClient")?.focus(),50);
 }
 async function createRecord(table){
  const btn=$("openBtn");
  if(creating)return;
+
  const name=$("newClient").value.trim();
  if(!name)return alert("Escribe el nombre del cliente.");
+
  const existing=currentFor(table);
  if(existing){closeDlg();openRecord(existing.id);return}
 
  creating=true;
- const record={id:state.nextId++,table,client:name,status:"ACTIVE",openedAt:now(),shiftId:state.shiftId,note:"",total:null,payments:[],tip:0,photo:null};
+
+ const record={
+   id:state.nextId++,
+   table,
+   client:name,
+   status:"ACTIVE",
+   openedAt:now(),
+   shiftId:state.shiftId,
+   note:"",
+   total:null,
+   payments:[],
+   tip:0,
+   photo:null
+ };
+
  state.records.push(record);
 
- // Respuesta inmediata: no esperar IndexedDB para actualizar la pantalla.
  if(btn){
    btn.disabled=true;
    btn.textContent="✓";
    btn.style.background="#22c55e";
    btn.style.color="#08120b";
  }
+
  renderAll();
  closeDlg();
  goView("viewTables");
- persistStateBackground().finally(()=>{creating=false});
+
+ // Liberar inmediatamente el bloqueo de apertura.
+ creating=false;
+
+ // Persistir sin frenar la siguiente mesa.
+ persistStateBackground();
 }
 function paymentRows(r,withDelete=false){
  const rows=(r.payments||[]).map((p,i)=>{
