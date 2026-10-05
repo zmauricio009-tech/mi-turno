@@ -70,7 +70,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 </head>
 <body>
 <header>
-<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">FIX 1.17</span></h1>
+<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">RECOVERY 1.18</span></h1>
 <div class="topstats">
   <div class="pill" onclick="goView('viewActive')">🟢 Activas <b id="sumActive">0</b></div>
   <div class="pill" onclick="goView('viewPending')">🟠 Pendientes <b id="sumPending">0</b></div>
@@ -149,25 +149,72 @@ const DATA_RETENTION_DAYS=15;
 let state={records:[],nextId:1,shiftId:localDate()};
 
 let dbPromise=null;
-function openDB(){
+function openDB(timeoutMs=1200){
  if(dbPromise)return dbPromise;
  dbPromise=new Promise((resolve,reject)=>{
+  let settled=false;
   const req=indexedDB.open(DB_NAME,DB_VERSION);
+  const timer=setTimeout(()=>{
+   if(settled)return;
+   settled=true;
+   dbPromise=null;
+   reject(new Error("IndexedDB timeout"));
+  },timeoutMs);
+
   req.onupgradeneeded=()=>{
    const db=req.result;
    if(!db.objectStoreNames.contains(STORE_NAME))db.createObjectStore(STORE_NAME);
    if(!db.objectStoreNames.contains(PHOTO_STORE))db.createObjectStore(PHOTO_STORE);
   };
   req.onsuccess=()=>{
+   if(settled){try{req.result.close()}catch(_){};return}
+   settled=true; clearTimeout(timer);
    const db=req.result;
-   db.onversionchange=()=>{try{db.close()}catch(_){} dbPromise=null};
+   db.onversionchange=()=>{try{db.close()}catch(_){};dbPromise=null};
    resolve(db);
   };
-  req.onerror=()=>{dbPromise=null;reject(req.error)};
-  req.onblocked=()=>console.warn("IndexedDB bloqueada temporalmente");
+  req.onerror=()=>{
+   if(settled)return;
+   settled=true; clearTimeout(timer); dbPromise=null;
+   reject(req.error||new Error("IndexedDB error"));
+  };
+  req.onblocked=()=>{
+   if(settled)return;
+   settled=true; clearTimeout(timer); dbPromise=null;
+   reject(new Error("IndexedDB blocked"));
+  };
  });
  return dbPromise;
 }
+
+function readExistingStateNoUpgrade(timeoutMs=1000){
+ return new Promise(resolve=>{
+  let done=false;
+  const finish=v=>{if(done)return;done=true;clearTimeout(timer);resolve(v||null)};
+  const timer=setTimeout(()=>finish(null),timeoutMs);
+  let req;
+  try{req=indexedDB.open(DB_NAME)}catch(e){return finish(null)}
+  req.onerror=()=>finish(null);
+  req.onblocked=()=>finish(null);
+  req.onsuccess=()=>{
+   const db=req.result;
+   try{
+    if(!db.objectStoreNames.contains(STORE_NAME)){
+     try{db.close()}catch(_){}
+     return finish(null);
+    }
+    const tx=db.transaction(STORE_NAME,"readonly");
+    const gr=tx.objectStore(STORE_NAME).get("state");
+    gr.onsuccess=()=>{const v=gr.result;try{db.close()}catch(_){};finish(v)};
+    gr.onerror=()=>{try{db.close()}catch(_){};finish(null)};
+   }catch(e){
+    try{db.close()}catch(_){}
+    finish(null);
+   }
+  };
+ });
+}
+
 async function idbGet(key){
  const db=await openDB();
  return await new Promise((resolve,reject)=>{
@@ -258,62 +305,51 @@ function stampState(){
  state._savedAt=Date.now();
  state._revision=Number(state._revision||0)+1;
 }
-async function loadState(){
- let stored=null;
- try{stored=await idbGet("state")}catch(e){console.warn("No se pudo leer IndexedDB",e)}
-
+function loadStateImmediate(){
  const journal=readJournal();
- let chosen=null;
-
- if(stored&&journal){
-  chosen=stateVersion(journal)>=stateVersion(stored)?journal:stored;
- }else{
-  chosen=journal||stored;
- }
-
- if(chosen){
-  try{
-   const changed=await migrateEmbeddedPhotos(chosen);
-   if(changed){
-    chosen._savedAt=Date.now();
-    chosen._revision=Number(chosen._revision||0)+1;
-    writeJournal(chosen);
-    await idbSet("state",chosen);
-   }
-  }catch(e){console.warn("Migración de fotos pendiente",e)}
-  return chosen;
- }
+ if(journal)return journal;
 
  try{
   const legacy=JSON.parse(localStorage.getItem(KEY)||"null");
-  if(legacy){
-   try{await migrateEmbeddedPhotos(legacy)}catch(e){console.warn(e)}
-   legacy._savedAt=Date.now();
-   legacy._revision=1;
-   writeJournal(legacy);
-   await idbSet("state",legacy);
-   return legacy;
-  }
+  if(legacy)return legacy;
  }catch(e){}
 
- const fresh={records:[],nextId:1,shiftId:localDate(),_savedAt:Date.now(),_revision:1};
- writeJournal(fresh);
- return fresh;
+ return {records:[],nextId:1,shiftId:localDate(),_savedAt:Date.now(),_revision:1};
+}
+
+async function recoverNewerStateInBackground(){
+ try{
+  const stored=await readExistingStateNoUpgrade();
+  if(!stored)return false;
+
+  if(stateVersion(stored)>stateVersion(state)){
+   state=stored;
+   if(!Array.isArray(state.records))state.records=[];
+
+   const maxId=state.records.reduce((m,r)=>Math.max(m,Number(r.id)||0),0);
+   state.nextId=Math.max(Number(state.nextId)||1,maxId+1);
+   state.shiftId=localDate();
+
+   writeJournal(structuredClone(state));
+   renderAll();
+   return true;
+  }
+ }catch(e){
+  console.warn("Recuperación IndexedDB",e);
+ }
+ return false;
+}
+
+async function loadState(){
+ return loadStateImmediate();
 }
 
 async function cleanupOldData(){
  const cutoff=Date.now()-(DATA_RETENTION_DAYS*24*60*60*1000);
  let changed=normalizeState();
-
- try{
-  if(await migrateEmbeddedPhotos(state))changed=true;
- }catch(e){
-  console.warn("Migración de fotos",e);
- }
-
  const kept=[];
+
  for(const r of (state.records||[])){
-  // NUNCA borrar automáticamente mesas activas o pendientes.
   if(r.status==="ACTIVE"||r.status==="PAID_PENDING"){
    kept.push(r);
    continue;
@@ -321,22 +357,7 @@ async function cleanupOldData(){
 
   const ts=recordTimestamp(r);
 
-  // En cerradas, borrar comprobantes mayores a 15 días.
-  for(const p of (r.payments||[])){
-   const pts=Date.parse(p.createdAt||r.paidAt||r.openedAt||"");
-   if(hasPaymentPhoto(p) && Number.isFinite(pts) && pts<cutoff){
-    if(p.photoKey){
-     try{await idbPhotoDelete(p.photoKey)}catch(e){console.warn(e)}
-    }
-    delete p.photoKey;
-    delete p.photo;
-    changed=true;
-   }
-  }
-
-  // Solo registros CERRADOS de más de 15 días se eliminan.
   if(r.status==="CLOSED" && ts!==null && ts<cutoff){
-   try{await deleteRecordPhotos(r)}catch(e){console.warn(e)}
    changed=true;
    continue;
   }
@@ -351,9 +372,8 @@ async function cleanupOldData(){
 
  if(changed){
   stampState();
-  const snapshot=structuredClone(state);
-  writeJournal(snapshot);
-  await idbSet("state",snapshot);
+  writeJournal(structuredClone(state));
+  persistStateBackground();
  }
 }
 
@@ -361,21 +381,37 @@ async function persistState(){
  stampState();
  const snapshot=structuredClone(state);
  writeJournal(snapshot);
- await idbSet("state",snapshot);
+ persistStateBackground();
+ return true;
 }
+
 let saveQueue=Promise.resolve();
 function persistStateBackground(){
  stampState();
  const snapshot=structuredClone(state);
 
- // Guardado inmediato para evitar que una mesa desaparezca si sales enseguida.
+ // Guardado primario instantáneo.
  writeJournal(snapshot);
 
- // Copia durable a IndexedDB sin bloquear la interfaz.
+ // IndexedDB es secundaria y nunca bloquea la interfaz.
  saveQueue=saveQueue
   .catch(()=>{})
-  .then(()=>idbSet("state",snapshot))
-  .catch(err=>console.error("Guardado IndexedDB",err));
+  .then(async()=>{
+   try{
+    const db=await openDB(1000);
+    await new Promise((resolve,reject)=>{
+     try{
+      const tx=db.transaction(STORE_NAME,"readwrite");
+      tx.objectStore(STORE_NAME).put(snapshot,"state");
+      tx.oncomplete=()=>resolve();
+      tx.onerror=()=>reject(tx.error);
+      tx.onabort=()=>reject(tx.error||new Error("tx abort"));
+     }catch(e){reject(e)}
+    });
+   }catch(e){
+    console.warn("IndexedDB secundaria no disponible",e);
+   }
+  });
 
  return true;
 }
@@ -1002,26 +1038,24 @@ $("voiceBtn").onclick=()=>{
  rec.start();
 };
 async function startApp(){
- state=await loadState();
-
+ state=loadStateImmediate();
  if(!Array.isArray(state.records))state.records=[];
+
  const maxId=state.records.reduce((m,r)=>Math.max(m,Number(r.id)||0),0);
  state.nextId=Math.max(Number(state.nextId)||1,maxId+1);
+ state.shiftId=localDate();
 
- // La fecha operativa siempre sigue la fecha local actual.
- if(state.shiftId!==localDate()){
-  state.shiftId=localDate();
-  persistStateBackground();
- }
-
- await cleanupOldData();
+ // Mostrar mesas inmediatamente.
  renderAll();
 
+ // Tareas de recuperación/limpieza sin bloquear la pantalla.
+ cleanupOldData().catch(e=>console.warn("Limpieza",e));
+ recoverNewerStateInBackground().catch(e=>console.warn("Recuperación",e));
+
  if("serviceWorker" in navigator){
-  try{
-   const reg=await navigator.serviceWorker.register("./sw.js");
-   reg.update().catch(()=>{});
-  }catch(e){console.warn("Service worker",e)}
+  navigator.serviceWorker.register("./sw.js")
+   .then(reg=>reg.update().catch(()=>{}))
+   .catch(e=>console.warn("Service worker",e));
  }
 }
 startApp();

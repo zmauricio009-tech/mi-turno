@@ -1,4 +1,4 @@
-const CACHE='mi-turno-pwa-v1-17-fix';
+const CACHE='mi-turno-pwa-v1-18-recovery';
 const ASSETS=['./','./index.html','./manifest.webmanifest','./icon-192.png','./icon-512.png'];
 
 self.addEventListener('install',event=>{
