@@ -70,7 +70,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 </head>
 <body>
 <header>
-<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">STABLE 1.16</span></h1>
+<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">FIX 1.17</span></h1>
 <div class="topstats">
   <div class="pill" onclick="goView('viewActive')">🟢 Activas <b id="sumActive">0</b></div>
   <div class="pill" onclick="goView('viewPending')">🟠 Pendientes <b id="sumPending">0</b></div>
@@ -299,6 +299,62 @@ async function loadState(){
  const fresh={records:[],nextId:1,shiftId:localDate(),_savedAt:Date.now(),_revision:1};
  writeJournal(fresh);
  return fresh;
+}
+
+async function cleanupOldData(){
+ const cutoff=Date.now()-(DATA_RETENTION_DAYS*24*60*60*1000);
+ let changed=normalizeState();
+
+ try{
+  if(await migrateEmbeddedPhotos(state))changed=true;
+ }catch(e){
+  console.warn("Migración de fotos",e);
+ }
+
+ const kept=[];
+ for(const r of (state.records||[])){
+  // NUNCA borrar automáticamente mesas activas o pendientes.
+  if(r.status==="ACTIVE"||r.status==="PAID_PENDING"){
+   kept.push(r);
+   continue;
+  }
+
+  const ts=recordTimestamp(r);
+
+  // En cerradas, borrar comprobantes mayores a 15 días.
+  for(const p of (r.payments||[])){
+   const pts=Date.parse(p.createdAt||r.paidAt||r.openedAt||"");
+   if(hasPaymentPhoto(p) && Number.isFinite(pts) && pts<cutoff){
+    if(p.photoKey){
+     try{await idbPhotoDelete(p.photoKey)}catch(e){console.warn(e)}
+    }
+    delete p.photoKey;
+    delete p.photo;
+    changed=true;
+   }
+  }
+
+  // Solo registros CERRADOS de más de 15 días se eliminan.
+  if(r.status==="CLOSED" && ts!==null && ts<cutoff){
+   try{await deleteRecordPhotos(r)}catch(e){console.warn(e)}
+   changed=true;
+   continue;
+  }
+
+  kept.push(r);
+ }
+
+ if(kept.length!==state.records.length){
+  state.records=kept;
+  changed=true;
+ }
+
+ if(changed){
+  stampState();
+  const snapshot=structuredClone(state);
+  writeJournal(snapshot);
+  await idbSet("state",snapshot);
+ }
 }
 
 async function persistState(){
@@ -872,6 +928,18 @@ function toggleHistory(){
      <div class="small">Toca para ver pagos${allPhotoCount(r)?" y comprobantes":""}</div>
    </div>`).join("");
 }
+function recordLocalDate(r){
+ const raw=r?.openedAt||r?.paidAt||r?.closedAt;
+ if(!raw)return "";
+ const d=new Date(raw);
+ if(Number.isNaN(d.getTime()))return "";
+ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function displayLocalDate(isoDate){
+ const [y,m,d]=String(isoDate||"").split("-");
+ return (y&&m&&d)?`${d}/${m}/${y}`:String(isoDate||"");
+}
+
 function endShift(){
  const curr=currentRecords();
  if(curr.length)return alert(`No puedes cerrar todavía: tienes ${curr.length} cuenta(s) activa(s) o pendiente(s).`);
