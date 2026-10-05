@@ -70,7 +70,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 </head>
 <body>
 <header>
-<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">HOTFIX 1.15</span></h1>
+<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">STABLE 1.16</span></h1>
 <div class="topstats">
   <div class="pill" onclick="goView('viewActive')">🟢 Activas <b id="sumActive">0</b></div>
   <div class="pill" onclick="goView('viewPending')">🟠 Pendientes <b id="sumPending">0</b></div>
@@ -100,7 +100,8 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 </section>
 
 <section id="viewShift" class="view">
-  <h2>Mi turno</h2><div class="notice">🗂️ Historial cerrado y fotos QR: conservación automática de 15 días. Las cuentas activas o pendientes no se eliminan hasta resolverse.</div>
+  <h2>Mi turno</h2>
+  <div class="notice" id="todayBanner" style="margin-bottom:10px">📅 Fecha operativa: --</div><div class="notice">🗂️ Historial cerrado y fotos QR: conservación automática de 15 días. Las cuentas activas o pendientes no se eliminan hasta resolverse.</div>
   <div class="row">
     <div class="kv">
       <div><div class="small">Aperturas</div><div class="metric" id="stOpen">0</div></div>
@@ -138,6 +139,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 <script>
 const GROUPS={"M":20,"GALERIA":15,"MIRADOR":7,"PISCINA":20,"CABAÑA":11,"P.A":7,"P.E":7,"P.B":11,"P.C":15,"P.D":9};
 const KEY="mi_turno_pwa_v1";
+const JOURNAL_KEY="mi_turno_state_fast_v2";
 const DB_NAME="mi_turno_db";
 const DB_VERSION=2;
 const STORE_NAME="app";
@@ -239,86 +241,85 @@ async function migrateEmbeddedPhotos(s){
  }
  return changed;
 }
+function stateVersion(s){return Number(s?._savedAt||0)}
+function writeJournal(snapshot){
+ try{
+  localStorage.setItem(JOURNAL_KEY,JSON.stringify(snapshot));
+  return true;
+ }catch(e){
+  console.warn("Journal local no disponible",e);
+  return false;
+ }
+}
+function readJournal(){
+ try{return JSON.parse(localStorage.getItem(JOURNAL_KEY)||"null")}catch(e){return null}
+}
+function stampState(){
+ state._savedAt=Date.now();
+ state._revision=Number(state._revision||0)+1;
+}
 async function loadState(){
  let stored=null;
  try{stored=await idbGet("state")}catch(e){console.warn("No se pudo leer IndexedDB",e)}
- if(stored){
-  try{
-   const changed=await migrateEmbeddedPhotos(stored);
-   if(changed)await idbSet("state",stored);
-  }catch(e){console.warn("Migración de fotos pendiente",e)}
-  return stored;
+
+ const journal=readJournal();
+ let chosen=null;
+
+ if(stored&&journal){
+  chosen=stateVersion(journal)>=stateVersion(stored)?journal:stored;
+ }else{
+  chosen=journal||stored;
  }
+
+ if(chosen){
+  try{
+   const changed=await migrateEmbeddedPhotos(chosen);
+   if(changed){
+    chosen._savedAt=Date.now();
+    chosen._revision=Number(chosen._revision||0)+1;
+    writeJournal(chosen);
+    await idbSet("state",chosen);
+   }
+  }catch(e){console.warn("Migración de fotos pendiente",e)}
+  return chosen;
+ }
+
  try{
   const legacy=JSON.parse(localStorage.getItem(KEY)||"null");
   if(legacy){
    try{await migrateEmbeddedPhotos(legacy)}catch(e){console.warn(e)}
+   legacy._savedAt=Date.now();
+   legacy._revision=1;
+   writeJournal(legacy);
    await idbSet("state",legacy);
-   localStorage.removeItem(KEY);
    return legacy;
   }
  }catch(e){}
- return {records:[],nextId:1,shiftId:localDate()};
+
+ const fresh={records:[],nextId:1,shiftId:localDate(),_savedAt:Date.now(),_revision:1};
+ writeJournal(fresh);
+ return fresh;
 }
-function recordTimestamp(r){
- const raw=r.closedAt || r.paidAt || r.openedAt;
- const ts=Date.parse(raw||"");
- return Number.isFinite(ts)?ts:null;
-}
-function normalizeState(){
- let changed=false;
- for(const r of state.records){
-  if(!Array.isArray(r.payments)){r.payments=[];changed=true}
-  for(const p of r.payments){
-   if(!p.createdAt){p.createdAt=r.paidAt||r.openedAt||now();changed=true}
-   if(p.received==null && p.sale!=null){p.received=Number(p.sale||0);changed=true}
-   if(p.sale==null){p.sale=Number(p.received||0);changed=true}
-  }
-  if(r.photo){
-   const qr=r.payments.find(p=>p.type==="QR");
-   if(qr && !qr.photo){qr.photo=r.photo;changed=true}
-   r.photo=null;changed=true
-  }
- }
- return changed
-}
-async function cleanupOldData(){
- const cutoff=Date.now()-(DATA_RETENTION_DAYS*24*60*60*1000);
- let changed=normalizeState();
- try{if(await migrateEmbeddedPhotos(state))changed=true}catch(e){console.warn(e)}
- const kept=[];
- for(const r of state.records){
-  const ts=recordTimestamp(r);
-  for(const p of (r.payments||[])){
-   const pts=Date.parse(p.createdAt||r.paidAt||r.openedAt||"");
-   if(hasPaymentPhoto(p) && Number.isFinite(pts) && pts<cutoff){
-    if(p.photoKey){try{await idbPhotoDelete(p.photoKey)}catch(e){console.warn(e)}}
-    delete p.photoKey; delete p.photo; changed=true;
-   }
-  }
-  if(r.status==="CLOSED" && ts!==null && ts<cutoff){
-   await deleteRecordPhotos(r);
-   changed=true;
-   continue;
-  }
-  kept.push(r);
- }
- if(kept.length!==state.records.length)state.records=kept;
- if(changed)await idbSet("state",state);
-}
+
 async function persistState(){
- await idbSet("state",state);
+ stampState();
+ const snapshot=structuredClone(state);
+ writeJournal(snapshot);
+ await idbSet("state",snapshot);
 }
 let saveQueue=Promise.resolve();
 function persistStateBackground(){
+ stampState();
  const snapshot=structuredClone(state);
 
+ // Guardado inmediato para evitar que una mesa desaparezca si sales enseguida.
+ writeJournal(snapshot);
+
+ // Copia durable a IndexedDB sin bloquear la interfaz.
  saveQueue=saveQueue
-   .catch(()=>{})
-   .then(()=>idbSet("state",snapshot))
-   .catch(err=>{
-     console.error("Guardado en segundo plano",err);
-   });
+  .catch(()=>{})
+  .then(()=>idbSet("state",snapshot))
+  .catch(err=>console.error("Guardado IndexedDB",err));
 
  return true;
 }
@@ -410,7 +411,7 @@ function recalcFinalAllocation(r){
 }
 
 function allTables(){let a=[];for(const [z,n] of Object.entries(GROUPS))for(let i=1;i<=n;i++)a.push({zone:z,label:`${z} ${i}`});return a}
-function currentRecords(){return state.records.filter(r=>r.shiftId===state.shiftId&&(r.status==="ACTIVE"||r.status==="PAID_PENDING"))}
+function currentRecords(){return state.records.filter(r=>r.status==="ACTIVE"||r.status==="PAID_PENDING")}
 function currentFor(table){return currentRecords().find(r=>r.table===table)}
 function showDlg(html){
  $("dlgBody").innerHTML=html;
@@ -483,7 +484,7 @@ async function createRecord(table){
    client:name,
    status:"ACTIVE",
    openedAt:now(),
-   shiftId:state.shiftId,
+   shiftId:localDate(),
    note:"",
    total:null,
    payments:[],
@@ -866,12 +867,57 @@ function toggleHistory(){
  $("historyList").innerHTML=[...state.records].reverse().map(r=>`
    <div class="row" onclick="openHistoryDetail(${r.id})" style="cursor:pointer">
      <b>${r.table} · ${esc(r.client)} ${allPhotoCount(r)?`📷×${allPhotoCount(r)}`:""}</b>
-     <div>${r.shiftId} · ${statusLabel(r.status)}</div>
+     <div>${recordLocalDate(r)||r.shiftId||""} · ${statusLabel(r.status)}</div>
      <div>${r.total!=null?`Cuenta ${money(r.total)} Bs · Recibido ${money(totalReceived(r))} Bs · Propina ${money(r.tip)} Bs`:""}</div>
      <div class="small">Toca para ver pagos${allPhotoCount(r)?" y comprobantes":""}</div>
    </div>`).join("");
 }
-function endShift(){const curr=currentRecords();if(curr.length)return alert(`No puedes cerrar todavía: tienes ${curr.length} cuenta(s) activa(s) o pendiente(s).`);if(confirm("¿Cerrar turno e iniciar uno nuevo? El historial se conserva.")){state.shiftId=localDate()+"-"+Date.now();save()}}
+function endShift(){
+ const curr=currentRecords();
+ if(curr.length)return alert(`No puedes cerrar todavía: tienes ${curr.length} cuenta(s) activa(s) o pendiente(s).`);
+ if(confirm("¿Cerrar turno? El historial se conserva.")){
+  state.shiftId=localDate();
+  persistStateBackground();
+  renderAll();
+ }
+}
+function renderStats(){
+ const today=localDate();
+ const todayRecords=state.records.filter(r=>recordLocalDate(r)===today);
+ const unresolved=currentRecords();
+
+ const active=unresolved.filter(r=>r.status==="ACTIVE").length;
+ const pending=unresolved.filter(r=>r.status==="PAID_PENDING").length;
+ const opened=todayRecords.length;
+ const closed=todayRecords.filter(r=>r.status==="CLOSED").length;
+
+ let qr=0,pos=0,cash=0,tips=0;
+ for(const r of todayRecords){
+  for(const p of (r.payments||[])){
+   if(p.type==="QR")qr+=Number(p.sale??p.received??0);
+   else if(p.type==="POS")pos+=Number(p.received??0);
+   else if(p.type==="EFECTIVO")cash+=Number(p.received??0);
+  }
+  tips+=Number(r.tip||0);
+ }
+
+ $("sumActive").textContent=active;
+ $("sumPending").textContent=pending;
+ $("sumTips").textContent=money(tips);
+
+ $("stOpen").textContent=opened;
+ $("stClosed").textContent=closed;
+ $("stActive").textContent=active;
+ $("stPending").textContent=pending;
+ $("stQR").textContent=`${money(qr)} Bs`;
+ $("stPOS").textContent=`${money(pos)} Bs`;
+ $("stCash").textContent=`${money(cash)} Bs`;
+ $("stTips").textContent=`${money(tips)} Bs`;
+
+ const banner=$("todayBanner");
+ if(banner)banner.textContent=`📅 Fecha operativa: ${displayLocalDate(today)} · según la fecha del teléfono`;
+}
+
 function renderAll(){renderTables();renderActive();renderPending();renderStats()}
 $("quickSearch").addEventListener("input",renderTables);
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>goView(b.dataset.view));
@@ -889,8 +935,20 @@ $("voiceBtn").onclick=()=>{
 };
 async function startApp(){
  state=await loadState();
+
+ if(!Array.isArray(state.records))state.records=[];
+ const maxId=state.records.reduce((m,r)=>Math.max(m,Number(r.id)||0),0);
+ state.nextId=Math.max(Number(state.nextId)||1,maxId+1);
+
+ // La fecha operativa siempre sigue la fecha local actual.
+ if(state.shiftId!==localDate()){
+  state.shiftId=localDate();
+  persistStateBackground();
+ }
+
  await cleanupOldData();
  renderAll();
+
  if("serviceWorker" in navigator){
   try{
    const reg=await navigator.serviceWorker.register("./sw.js");
