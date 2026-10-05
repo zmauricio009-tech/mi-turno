@@ -70,7 +70,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 </head>
 <body>
 <header>
-<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">RECOVERY 1.18</span></h1>
+<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">CIERRE 1.19</span></h1>
 <div class="topstats">
   <div class="pill" onclick="goView('viewActive')">🟢 Activas <b id="sumActive">0</b></div>
   <div class="pill" onclick="goView('viewPending')">🟠 Pendientes <b id="sumPending">0</b></div>
@@ -782,25 +782,135 @@ function saveNoteDirect(id){
  if(btn){btn.disabled=true;btn.textContent="✓";btn.style.background="#22c55e";btn.style.color="#08120b"}
  renderAll();openRecord(id);persistStateBackground();
 }
+
+function closeSummaryData(r,totalValue){
+ const total=Number(totalValue);
+ const qr=totalByType(r,"QR");
+ const pos=totalByType(r,"POS");
+ const cash=totalByType(r,"EFECTIVO");
+ const received=qr+pos+cash;
+
+ if(!Number.isFinite(total)||total<=0){
+  return {total:null,qr,pos,cash,received,diff:null,tip:null,status:"waiting"};
+ }
+
+ const diff=received-total;
+
+ if(received<total-.01){
+  return {total,qr,pos,cash,received,diff,tip:0,status:"missing"};
+ }
+
+ // El exceso solo puede considerarse propina si puede salir del QR.
+ // POS y efectivo deben corresponder a venta real.
+ const nonQr=pos+cash;
+ if(nonQr>total+.01){
+  return {total,qr,pos,cash,received,diff,tip:0,status:"invalid_nonqr"};
+ }
+
+ const tip=Math.max(0,diff);
+ if(tip>qr+.01){
+  return {total,qr,pos,cash,received,diff,tip:0,status:"invalid_tip"};
+ }
+
+ return {total,qr,pos,cash,received,diff,tip,status:"ok"};
+}
+
+function closeSummaryHTML(r,totalValue){
+ const s=closeSummaryData(r,totalValue);
+
+ let result="";
+ if(s.status==="waiting"){
+  result=`<b>Registrado hasta ahora</b><br>
+  QR: ${money(s.qr)} Bs · POS: ${money(s.pos)} Bs · Efectivo: ${money(s.cash)} Bs<br>
+  <b>Total recibido: ${money(s.received)} Bs</b><br>
+  <span class="small">Escribe arriba el total real de Restotech para comparar.</span>`;
+ }else if(s.status==="missing"){
+  result=`<b>Restotech: ${money(s.total)} Bs</b><br>
+  QR: ${money(s.qr)} Bs · POS: ${money(s.pos)} Bs · Efectivo: ${money(s.cash)} Bs<br>
+  Recibido: ${money(s.received)} Bs<br>
+  <b style="color:#f59e0b">Falta: ${money(Math.abs(s.diff))} Bs</b>`;
+ }else if(s.status==="invalid_nonqr"){
+  result=`<b>Restotech: ${money(s.total)} Bs</b><br>
+  QR: ${money(s.qr)} Bs · POS: ${money(s.pos)} Bs · Efectivo: ${money(s.cash)} Bs<br>
+  Recibido: ${money(s.received)} Bs<br>
+  <b style="color:#ef4444">Revisar: POS + efectivo superan el total de Restotech.</b>`;
+ }else if(s.status==="invalid_tip"){
+  result=`<b>Restotech: ${money(s.total)} Bs</b><br>
+  Recibido: ${money(s.received)} Bs<br>
+  <b style="color:#ef4444">La diferencia no puede asignarse como propina QR.</b>`;
+ }else{
+  result=`<b>Restotech: ${money(s.total)} Bs</b><br>
+  QR: ${money(s.qr)} Bs · POS: ${money(s.pos)} Bs · Efectivo: ${money(s.cash)} Bs<br>
+  <b>Recibido: ${money(s.received)} Bs</b><br>
+  ${s.tip>0
+    ?`<b style="color:#22c55e">Propina QR: ${money(s.tip)} Bs ✓</b>`
+    :`<b style="color:#22c55e">Coincide: sin diferencia ✓</b>`}`;
+ }
+ return result;
+}
+
+function updateCloseSummary(id){
+ const r=state.records.find(x=>x.id===id);
+ if(!r)return;
+ const input=$("accountTotalInput");
+ const box=$("closeSummary");
+ if(!input||!box)return;
+
+ const v=input.value.trim()===""?NaN:Number(input.value);
+ box.innerHTML=closeSummaryHTML(r,v);
+
+ const btn=$("finalizeSaveBtn");
+ if(!btn)return;
+
+ const s=closeSummaryData(r,v);
+ const enabled=s.status==="ok";
+ btn.disabled=!enabled;
+ btn.style.opacity=enabled?"1":".55";
+ btn.style.cursor=enabled?"pointer":"not-allowed";
+}
+
 function openPaymentManager(id){
  const r=state.records.find(x=>x.id===id);if(!r)return;
+
+ const currentTotal=(r.total!=null && Number(r.total)>0)?Number(r.total):"";
+
  showDlg(`<h2>Revisar / cerrar ${r.table}</h2>
  <div class="client">${esc(r.client)}</div>
- <label>Total de la cuenta en Restotech (Bs)</label>
- <input id="accountTotalInput" type="number" inputmode="decimal" step="0.01" placeholder="Ej. 1200" value="${r.total??""}" oninput="updateCloseSummary(${id})">
- <div id="closeSummary" class="notice closeSummary">${closeSummaryHTML(r,Number(r.total))}</div>
+
+ <label>Total real de Restotech (Bs)</label>
+ <input id="accountTotalInput"
+        type="number"
+        inputmode="decimal"
+        step="0.01"
+        placeholder="Ej. 51"
+        value="${currentTotal}"
+        oninput="updateCloseSummary(${id})">
+
+ <div id="closeSummary" class="notice closeSummary">
+   ${closeSummaryHTML(r,currentTotal===""?NaN:currentTotal)}
+ </div>
+
  <h3 style="margin-top:14px">Movimientos registrados</h3>
  ${paymentRows(r,true)}
  ${paymentPhotoGallery(r)}
+
  <div class="quickPayGrid">
    <button onclick="openQuickPayment(${id},'QR')">+ QR</button>
    <button class="secondary" onclick="openQuickPayment(${id},'POS')">+ POS</button>
    <button class="secondary" onclick="openQuickPayment(${id},'EFECTIVO')">+ Efectivo</button>
  </div>
+
  <div class="actions">
    <button class="secondary" onclick="openRecord(${id})">Volver</button>
-   <button id="finalizeSaveBtn" class="green" onclick="finalizePayments(${id})">Pago completo → pendiente caja</button>
- </div>`)
+   <button id="finalizeSaveBtn" class="green" onclick="finalizePayments(${id})">
+     Pago completo → pendiente caja
+   </button>
+ </div>`);
+
+ setTimeout(()=>{
+   updateCloseSummary(id);
+   $("accountTotalInput")?.focus();
+ },50);
 }
 
 function openAddPayment(id,type){openQuickPayment(id,type)}
@@ -820,17 +930,37 @@ async function deletePayment(id,index,btn){
 }
 async function finalizePayments(id){
  const btn=$("finalizeSaveBtn");
- const r=state.records.find(x=>x.id===id),v=Number($("accountTotalInput")?.value);
- if(!Number.isFinite(v)||v<=0)return alert("Escribe el total real de Restotech.");
+ const r=state.records.find(x=>x.id===id);
+ if(!r)return;
+
+ const raw=$("accountTotalInput")?.value?.trim();
+ const v=Number(raw);
+ if(!raw || !Number.isFinite(v) || v<=0){
+  return alert("Escribe el total real de Restotech.");
+ }
+
  r.total=v;
  const result=recalcFinalAllocation(r);
- if(!result.ok)return alert(result.msg);
 
- r.status="PAID_PENDING";r.paidAt=now();
- if(btn){btn.disabled=true;btn.textContent="✓";btn.style.background="#22c55e";btn.style.color="#08120b"}
+ if(!result.ok){
+  updateCloseSummary(id);
+  return alert(result.msg);
+ }
+
+ r.status="PAID_PENDING";
+ r.paidAt=now();
+
+ if(btn){
+  btn.disabled=true;
+  btn.textContent="✓ Pendiente de caja";
+  btn.style.background="#22c55e";
+  btn.style.color="#08120b";
+ }
+
  renderAll();
- openRecord(id);
  persistStateBackground();
+
+ setTimeout(()=>openRecord(id),60);
 }
 let paymentGalleryRecordId=null;
 let paymentGalleryType="QR";
