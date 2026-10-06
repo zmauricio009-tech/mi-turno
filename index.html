@@ -70,7 +70,7 @@ hr{border:0;border-top:1px solid var(--line);margin:14px 0}.notice{background:#1
 </head>
 <body>
 <header>
-<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">CIERRE 1.19</span></h1>
+<h1>Mi Turno <span style="font-size:11px;color:#64748b;font-weight:600">QR TIP 1.20</span></h1>
 <div class="topstats">
   <div class="pill" onclick="goView('viewActive')">🟢 Activas <b id="sumActive">0</b></div>
   <div class="pill" onclick="goView('viewPending')">🟠 Pendientes <b id="sumPending">0</b></div>
@@ -478,28 +478,45 @@ function cardPayments(r){
 function accountBalance(r){return Math.max(0,Number(r.total||0)-totalReceived(r))}
 function recalcFinalAllocation(r){
  const total=Number(r.total||0);
- const qrTotal=totalByType(r,"QR"), pos=totalByType(r,"POS"), cash=totalByType(r,"EFECTIVO");
- const received=qrTotal+pos+cash;
- if(!Number.isFinite(total)||total<=0)return {ok:false,msg:"Escribe el total real de la cuenta."};
- if(received<total-.01)return {ok:false,msg:`Faltan ${money(total-received)} Bs para completar la cuenta.`};
- const nonQr=pos+cash;
- if(nonQr>total+.01)return {ok:false,msg:"POS + efectivo superan el total de la cuenta. Corrige los movimientos."};
- const qrSaleTarget=Math.max(0,total-nonQr);
- if(qrTotal<qrSaleTarget-.01)return {ok:false,msg:`El QR acumulado debe cubrir al menos ${money(qrSaleTarget)} Bs.`};
- let qrRemaining=qrSaleTarget;
+ const qrTotal=totalByType(r,"QR");
+ const posTotal=totalByType(r,"POS");
+ const cashTotal=totalByType(r,"EFECTIVO");
+ const received=qrTotal+posTotal+cashTotal;
+
+ if(!Number.isFinite(total)||total<=0){
+  return {ok:false,msg:"Escribe el total real de la cuenta."};
+ }
+
+ if(received<total-.01){
+  return {ok:false,msg:`Faltan ${money(total-received)} Bs para completar la cuenta.`};
+ }
+
+ const excess=Math.max(0,received-total);
+
+ // La diferencia positiva SOLO puede salir del QR y se registra como propina.
+ if(excess>qrTotal+.01){
+  return {ok:false,msg:"La diferencia supera el monto QR disponible para propina."};
+ }
+
+ // POS y efectivo quedan exactamente como fueron registrados.
+ // Del QR se descuenta primero la propina y el resto queda como venta.
+ let tipRemaining=excess;
  for(const p of (r.payments||[])){
   const recv=Number(p.received||0);
+
   if(p.type==="QR"){
-   p.sale=Math.min(recv,Math.max(0,qrRemaining));
-   p.tip=Math.max(0,recv-p.sale);
-   qrRemaining-=p.sale;
+   const thisTip=Math.min(recv,tipRemaining);
+   p.tip=thisTip;
+   p.sale=recv-thisTip;
+   tipRemaining-=thisTip;
   }else{
    p.sale=recv;
    p.tip=0;
   }
  }
- r.tip=Math.max(0,received-total);
- return {ok:true,received,tip:r.tip}
+
+ r.tip=excess;
+ return {ok:true,received,tip:r.tip};
 }
 
 function allTables(){let a=[];for(const [z,n] of Object.entries(GROUPS))for(let i=1;i<=n;i++)a.push({zone:z,label:`${z} ${i}`});return a}
@@ -796,18 +813,14 @@ function closeSummaryData(r,totalValue){
 
  const diff=received-total;
 
- if(received<total-.01){
+ if(diff<-.01){
   return {total,qr,pos,cash,received,diff,tip:0,status:"missing"};
  }
 
- // El exceso solo puede considerarse propina si puede salir del QR.
- // POS y efectivo deben corresponder a venta real.
- const nonQr=pos+cash;
- if(nonQr>total+.01){
-  return {total,qr,pos,cash,received,diff,tip:0,status:"invalid_nonqr"};
- }
-
  const tip=Math.max(0,diff);
+
+ // Regla fija: todo exceso se considera propina QR.
+ // Si hay QR suficiente para absorber esa diferencia, el cierre es válido.
  if(tip>qr+.01){
   return {total,qr,pos,cash,received,diff,tip:0,status:"invalid_tip"};
  }
